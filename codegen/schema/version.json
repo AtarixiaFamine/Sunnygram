@@ -1,0 +1,23 @@
+{
+  "errors": {
+    "count": 818,
+    "layer": 227,
+    "sha256": "fb7304a7f7e66a6750f9ca842dd1406ed3798eebd6f4f2d993924135848ee82e",
+    "url": "https://core.telegram.org/api/errors.json"
+  },
+  "files": {
+    "api.tl": {
+      "lines": 3088,
+      "sha256": "bbddd9c4c3f5ff16fd4abbf39f2a864fdac7553e9f05b6bf9ead2aeb9c8eb566",
+      "url": "https://raw.githubusercontent.com/telegramdesktop/tdesktop/v7.0.6/Telegram/SourceFiles/mtproto/scheme/api.tl"
+    },
+    "mtproto.tl": {
+      "lines": 129,
+      "sha256": "40c10255afb6cfcbcfc190a457a53b66ec9e410f6418cd97cc4c276709a739a9",
+      "url": "https://raw.githubusercontent.com/telegramdesktop/tdesktop/v7.0.6/Telegram/SourceFiles/mtproto/scheme/mtproto.tl"
+    }
+  },
+  "layer": 228,
+  "release": "v7.0.6",
+  "retrieved": "2026-08-01"
+}

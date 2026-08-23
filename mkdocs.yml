@@ -1,0 +1,110 @@
+site_name: Sunnygram
+site_description: An async, MTProto-native Telegram client library for user accounts.
+site_url: https://atarixiafamine.github.io/Sunnygram/
+repo_url: https://github.com/AtarixiaFamine/Sunnygram
+repo_name: AtarixiaFamine/Sunnygram
+copyright: Copyright &copy; 2026 AtarixiaFamine
+
+# Same setup as Moonlygram's, so the two read as one family: Material for the
+# shell, mkdocstrings for the reference, and docstrings that stay plain prose
+# because nothing here asks them to be anything else (rule H9).
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: amber
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  # The migration guide shows the same program three ways, which is a tab strip
+  # or it is three code blocks nobody compares.
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            members_order: source
+            docstring_style: null
+            separate_signature: true
+            show_signature_annotations: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: quickstart.md
+      - Logging in: login.md
+      - Sessions: sessions.md
+      - Bringing a project over: importing.md
+  - Guides:
+      - Handling updates: updates.md
+      - Filters: filters.md
+      - Messages: messages.md
+      - Albums, polls, and the rest: attachments.md
+      - Files: files.md
+      - Chats and people: chats.md
+      - Forum topics: topics.md
+      - Stories: stories.md
+      - Payments and Stars: payments.md
+      - Running a chat: admin.md
+      - Buttons: buttons.md
+      - Inline mode: inline.md
+      - Talking to bots: bots.md
+      - The account itself: account.md
+      - Peers: peers.md
+      - Errors: errors.md
+      - Logging: logging.md
+      - Proxies: proxies.md
+      - Conversations: conversations.md
+      - Plugins: plugins.md
+      - Rate limits: rate-limits.md
+      - The raw API: raw-api.md
+      - Performance: performance.md
+  - Reference:
+      - Client: api/client.md
+      - Types: api/types.md
+      - Filters: api/filters.md
+      - Errors: api/errors.md
+      - Layers: api/layers.md

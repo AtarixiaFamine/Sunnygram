@@ -1,0 +1,23 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[docs]"
+      # --strict, so a link to a page that moved or a docstring reference that
+      # no longer resolves fails the build rather than shipping a broken page.
+      - name: Build and deploy
+        run: mkdocs gh-deploy --force --strict

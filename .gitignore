@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+coverage.xml
+
+# Docs build
+site/
+
+# Editors
+.vscode/
+.idea/
+
+# Sessions and downloads from local runs
+*.session
+*.session-journal
+
+# OS
+.DS_Store
+Thumbs.db

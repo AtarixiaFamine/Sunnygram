@@ -1,0 +1,100 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sunnygram"
+version = "1.0.0"
+description = "An async, MTProto-native Telegram client library for user accounts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MPL-2.0"
+authors = [{ name = "AtarixiaFamine" }]
+keywords = ["telegram", "mtproto", "userbot", "client", "async"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The two things that make a Telegram client faster without changing a line of
+# the program using it: the fastest AES available, and the fastest event loop.
+# Sunnygram picks the best of cryptg, tgcrypto, cryptography and its own
+# pure-Python implementation at import, in that order, and the best of uvloop,
+# winloop and asyncio's own loop when Client.run makes one. So this extra is a
+# recommendation rather than a requirement: installing nothing still works, and
+# an environment that already carries cryptography for other reasons already
+# gets most of the crypto half.
+#
+# uvloop has no Windows wheels and never has. winloop is the same libuv with the
+# same api for that platform, so the marker picks whichever one can actually
+# install rather than failing the extra on one of the three platforms.
+speedups = [
+    "cryptg>=0.4",
+    "uvloop>=0.19; platform_system != 'Windows'",
+    "winloop>=0.1.6; platform_system == 'Windows'",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    # The update state machine is held against a model of the server rather
+    # than a script of it, which needs generated sequences rather than written
+    # ones. See tests/test_updates_model.py.
+    "hypothesis>=6.100",
+    "ruff",
+    "mypy>=1.11",
+]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
+
+[project.urls]
+Homepage = "https://github.com/AtarixiaFamine/Sunnygram"
+Documentation = "https://atarixiafamine.github.io/Sunnygram/"
+Repository = "https://github.com/AtarixiaFamine/Sunnygram"
+Changelog = "https://github.com/AtarixiaFamine/Sunnygram/blob/main/CHANGELOG.md"
+Issues = "https://github.com/AtarixiaFamine/Sunnygram/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sunnygram"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# A file handle left open is a bug in whatever opened it, and one that surfaces
+# at whichever unrelated point the garbage collector gets round to noticing.
+# Failing where it happens is the only way to keep that honest.
+filterwarnings = ["error::ResourceWarning"]
+
+[tool.coverage.run]
+source = ["sunnygram"]
+# The generated layer is a couple of thousand constructors that are covered by
+# being used rather than by being visited one at a time. Counting its lines says
+# nothing about whether anything is tested and drowns out the part that does.
+omit = ["*/sunnygram/raw/*", "*/sunnygram/errors/generated.py"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "^\\s*\\.\\.\\.$",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/sunnygram"]
+
+# Every accelerated backend is optional, crypto and event loop alike, so none of
+# them is necessarily installed where this runs. Each is reached through one
+# guarded import and wrapped behind our own typed entry points.
+[[tool.mypy.overrides]]
+module = ["cryptg.*", "tgcrypto.*", "cryptography.*", "uvloop.*", "winloop.*"]
+ignore_missing_imports = true

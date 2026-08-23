@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests codegen examples
+      - name: Type-check
+        run: mypy
+      - name: Test
+        run: pytest -q --cov --cov-report=term-missing --cov-report=xml
+
+      # One version reports, so the number is one number rather than three that
+      # disagree because the matrix ran them on different interpreters.
+      - name: Keep the coverage report
+        if: matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  # Both generated trees, rebuilt from the vendored schema and error table and
+  # compared against what was committed (rule H7). The suite already compares
+  # them in memory; this runs the generators the way a person would and lets
+  # the checkout have its say, so a hand-edit or a stale commit fails here
+  # whatever it was that produced it.
+  codegen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Regenerate
+        run: |
+          python codegen/gen_tl.py
+          python codegen/gen_errors.py
+      - name: Nothing generated should have changed
+        run: git diff --exit-code -- src/sunnygram/raw src/sunnygram/errors

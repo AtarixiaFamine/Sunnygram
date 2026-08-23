@@ -1,0 +1,22 @@
+name: Schema pin
+
+# Whether Telegram has shipped a layer newer than the one we vendored. Kept out
+# of the CI workflow on purpose: this depends on the network and on Telegram's
+# release cadence, so it must never be able to fail a pull request. Moving a
+# layer is a deliberate act (rule S5) and this only reports that one is due.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compare the pin against the newest release
+        run: python codegen/refresh.py --check

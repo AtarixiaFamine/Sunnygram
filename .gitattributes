@@ -1,0 +1,14 @@
+# Normalise line endings on the way into the repository. Everything here is
+# text, and this project is developed on Windows but built, tested and installed
+# on Linux runners, so committing CRLF would put carriage returns into published
+# sdists and make every cross-platform diff noisy. Working copies keep whatever
+# the platform prefers; the committed bytes are LF.
+* text=auto eol=lf
+
+# Except the things that are not text. Recording them stops a future addition
+# from being silently corrupted by the rule above.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.session binary
