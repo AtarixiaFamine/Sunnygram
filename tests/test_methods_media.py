@@ -43,6 +43,9 @@ class TestKinds:
             ("holiday.jpg", "photo"),
             ("holiday.JPEG", "photo"),
             ("drawing.png", "photo"),
+            # Image shaped, but Telegram refuses both as a photo.
+            ("sticker.webp", "document"),
+            ("scan.bmp", "document"),
             ("clip.mp4", "video"),
             ("clip.MKV", "video"),
             ("cat.gif", "animation"),
