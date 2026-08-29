@@ -66,6 +66,13 @@ Issues = "https://github.com/AtarixiaFamine/Sunnygram/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sunnygram"]
 
+[tool.ruff.lint]
+# Pin the rule set instead of inheriting ruff's defaults, which widen between
+# releases: 0.16 folded pyupgrade, isort and more into the default selection,
+# which failed CI on code that had not changed. Adding rules is a deliberate
+# edit here, not a side effect of upgrading the linter.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # A file handle left open is a bug in whatever opened it, and one that surfaces

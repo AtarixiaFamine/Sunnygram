@@ -75,6 +75,10 @@ comes down to what the send says, not to anything in the file:
 await app.send_file(peer, "holiday.jpg", kind="document")   # keep it exact
 ```
 
+Only `.jpg`, `.jpeg` and `.png` guess their way to a photo. Telegram refuses every other
+image from a photo upload, webp and bmp included, so those guess to a document and arrive
+as files. Convert one to JPEG first if it has to show up inline.
+
 Other options: `thumb=` for a video's cover, `spoiler=True` to hide it behind a tap,
 `ttl_seconds=` for a view-once picture, `reply_to=`, `silent=`, and `progress=` for the
 same callable `download` takes.

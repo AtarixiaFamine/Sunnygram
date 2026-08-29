@@ -36,10 +36,12 @@ __all__ = [
 # What a caller can ask for, and what each one means on the other side.
 KINDS = ("auto", "photo", "video", "animation", "audio", "voice", "document")
 
-# Sent as a photo unless told otherwise. Telegram re-encodes these and strips
-# what it does not need, which is why anything a caller might want back byte
-# for byte has to go as a document instead.
-_PHOTO_TYPES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".bmp"})
+# The only two Telegram accepts as a photo. Anything else image shaped goes as
+# a document, webp and bmp included: webp is the format a sticker is made of,
+# and an upload that calls either of them a photo comes back PHOTO_EXT_INVALID.
+# What it does accept it re-encodes, stripping whatever it does not need, so
+# anything a caller wants back byte for byte belongs in a document as well.
+_PHOTO_TYPES = frozenset({".jpg", ".jpeg", ".png"})
 _VIDEO_TYPES = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"})
 _AUDIO_TYPES = frozenset({".mp3", ".m4a", ".flac", ".wav", ".aac", ".opus"})
 # A gif is not a gif on Telegram. It is a soundless mp4 marked as animated, and
