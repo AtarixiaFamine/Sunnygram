@@ -59,13 +59,22 @@ def test_dir_does_not_import_anything():
             "after = len(sys.modules)",
             "dir(sunnygram)",
             "generated = sum(1 for m in sys.modules if '.raw' in m)",
-            "print(after - before, len(sys.modules) - after, generated)",
+            "owned = sum(1 for m in sys.modules if m.split('.')[0] == 'sunnygram')",
+            "print(after - before, len(sys.modules) - after, generated, owned)",
         )
     )
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    on_import, on_dir, generated = (int(n) for n in result.stdout.split())
+    on_import, on_dir, generated, owned = (int(n) for n in result.stdout.split())
     assert on_dir == 0, "dir() imported something"
     assert generated == 0, "dir() reached the generated tree"
-    assert on_import <= 30, f"importing sunnygram now costs {on_import} modules"
+    # Our own modules, which is the number this rule is actually about and the
+    # only one that means the same thing on every version.
+    assert owned <= 8, f"importing sunnygram now costs {owned} of its own modules"
+    # The total counts stdlib modules the interpreter had not already loaded,
+    # so it says as much about the version as about us: the same import is 35
+    # modules on 3.11 and 24 on 3.13, which preloads more at startup. The
+    # ceiling is set for the oldest version the matrix runs and is here to catch
+    # a heavyweight dependency being imported eagerly, not to measure drift.
+    assert on_import <= 40, f"importing sunnygram now costs {on_import} modules"
