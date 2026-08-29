@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..peers import mark_id
 from ..raw import types
 from ..storage import PeerKind
 
@@ -34,6 +35,18 @@ class Chat:
 
     def __repr__(self) -> str:
         return f"Chat({self.kind.value} {self.id}, {self.title or 'no title'})"
+
+    @property
+    def marked_id(self) -> int:
+        """This chat's id in the spelling that says what it is on its own.
+
+        id is the id the protocol uses, which is the right one for a raw call
+        and the wrong one to write down on its own: the number does not say
+        which of the three id spaces it came from, so a stored 3003 could be a
+        person or a small group. This pairs it back with the kind, which is
+        what anything keeping a chat id in a database or a config wants.
+        """
+        return mark_id(self.id, self.kind)
 
     @property
     def is_private(self) -> bool:

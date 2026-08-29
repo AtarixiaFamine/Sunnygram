@@ -26,6 +26,7 @@ from .buttons import (
     remove_keyboard,
 )
 from .callback import CallbackQuery
+from .boost import Boost, BoostStatus
 from .chat import Chat
 from .dialog import Dialog
 from .events import Blocked, DeletedMessages, Status, Stopped, Typing
@@ -48,6 +49,8 @@ __all__ = [
     "Blocked",
     "Button",
     "CallbackQuery",
+    "Boost",
+    "BoostStatus",
     "Chat",
     "ChosenResult",
     "DeletedMessages",

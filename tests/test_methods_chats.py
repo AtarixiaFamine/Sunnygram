@@ -184,6 +184,57 @@ class TestParticipantPaging:
             types.ChannelParticipantsRecent,
         )
 
+    @pytest.mark.parametrize(
+        ("word", "wanted"),
+        [
+            ("admins", types.ChannelParticipantsAdmins),
+            ("bots", types.ChannelParticipantsBots),
+            ("banned", types.ChannelParticipantsKicked),
+            ("restricted", types.ChannelParticipantsBanned),
+            ("contacts", types.ChannelParticipantsContacts),
+        ],
+    )
+    async def test_a_word_asks_for_that_sort_of_member(self, word, wanted):
+        async with live() as (invoker, server):
+            server.answer_with = _participant_pages(each=0)
+            [
+                page
+                async for page in chats.iter_participant_pages(
+                    invoker, SUPERGROUP, kind=word
+                )
+            ]
+        assert isinstance(server.only(functions.channels.GetParticipants).filter, wanted)
+
+    async def test_banned_and_restricted_are_the_readable_way_round(self):
+        """Telegram's two names for these are the opposite of what they read as.
+
+        Its "kicked" is someone thrown out and its "banned" is someone still in
+        the chat but silenced, so the words here are swapped on purpose and this
+        is the test that says so.
+        """
+        async with live() as (invoker, server):
+            server.answer_with = _participant_pages(each=0)
+            [
+                page
+                async for page in chats.iter_participant_pages(
+                    invoker, SUPERGROUP, kind="banned"
+                )
+            ]
+            thrown_out = server.only(functions.channels.GetParticipants).filter
+        assert isinstance(thrown_out, types.ChannelParticipantsKicked)
+
+    async def test_a_search_term_reaches_a_filter_that_takes_one(self):
+        async with live() as (invoker, server):
+            server.answer_with = _participant_pages(each=0)
+            [
+                page
+                async for page in chats.iter_participant_pages(
+                    invoker, SUPERGROUP, kind="banned", query="pavel"
+                )
+            ]
+        chosen = server.only(functions.channels.GetParticipants).filter
+        assert chosen.q == "pavel"
+
 
 class TestUsers:
     async def test_blocking_and_unblocking(self):

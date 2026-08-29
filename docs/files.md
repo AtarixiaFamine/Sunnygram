@@ -34,6 +34,34 @@ await app.download(message, into="big.zip", progress=show, limit=100 * 1024 * 10
 `limit` refuses before fetching instead of after, which is the point of it for a program
 downloading something it did not choose.
 
+## Streaming
+
+`download` answers with the whole file. When the point is to start on the front of it
+before the back has arrived, or when the file is too big to want in memory, iterate it
+instead:
+
+```python
+async for piece in app.stream(message):
+    handle(piece)
+```
+
+`offset` and `length` take a byte range, the same pair an HTTP range asks in, so serving
+a seek means passing the numbers straight through:
+
+```python
+async for piece in app.stream(message, offset=1_000_000, length=65_536):
+    handle(piece)
+```
+
+Telegram only answers on a chunk boundary, so an offset in the middle of one is rounded
+down and the head of the first piece is dropped for you. Only the range asked for is
+fetched: a hundred bytes off a sixty megabyte file is one round trip.
+
+The pieces arrive one at a time rather than several, which is the trade and not an
+oversight. They have to be handed over in order, so fetching ahead only helps if they are
+held, and holding them is what you came here to avoid. When you want the file rather than
+the front of it, `download` is the faster call.
+
 ## Sending
 
 ```python

@@ -15,12 +15,23 @@ await app.send_message("@durov", "...")              # a username
 await app.send_message("durov", "...")               # the @ is optional
 await app.send_message(777000, "...")                # a user id
 await app.send_message(-1001234567890, "...")        # a marked channel id
+await app.send_message("-1001234567890", "...")      # the same, out of a config file
 await app.send_message("+15551234567", "...")        # a phone number, if a contact
-await app.send_message(message.chat.id, "...")       # wherever a message came from
+await app.send_message(message.chat, "...")           # wherever a message came from
+await app.send_message(message.sender, "...")        # whoever wrote it
 ```
 
 Only a name this session has never seen costs a call. Everything else is answered from the
-cache.
+cache. An id spelled in digits is read as an id whichever type it arrives as, because a
+username has to start with a letter and so nothing written entirely in digits is one. A
+phone number is the case that needs its `+`.
+
+The last two are the ones worth knowing about. A `Chat` and a `User` are for reading, but
+they name a peer as well as anything else does, so whatever `get_chat`, `get_user`, a
+dialog, a member or a message gave you goes back in as it came out. That is also the
+cheapest way in: the object still carries the `access_hash` it arrived with, where a bare
+`.id` has to be found in the cache and will not be there for somebody this session only
+ever met through that one object.
 
 ## Marked ids
 
@@ -32,6 +43,19 @@ out of another library's output works here.
 ```python
 from sunnygram.peers import mark_id, unmark_id
 ```
+
+A `Chat` spells its own, which is the one to write down:
+
+```python
+await store(chat.marked_id)     # survives being kept; chat.id does not
+```
+
+`chat.id` is the id the protocol uses. That is the right one for a [raw call](raw-api.md)
+and the wrong one to keep on its own, because the number does not say which of the three
+spaces it came from: a `3003` read back out of a database could be a person or a small
+group. `marked_id` pairs it with the kind, and goes back into anything that takes a peer.
+`User.marked_id` is the id itself, so code that stores either does not have to ask which
+it is holding.
 
 ## The cache
 

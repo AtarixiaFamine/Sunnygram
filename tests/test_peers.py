@@ -32,7 +32,9 @@ from sunnygram.peers import (
     resolve_username,
     unmark_id,
 )
+from sunnygram.peers.cache import _DECORATION, _LINK_PREFIXES
 from sunnygram.raw import functions, types
+from sunnygram.types import Chat, Message, User
 from sunnygram.storage import (
     MemoryStorage,
     PeerKind,
@@ -165,6 +167,18 @@ class TestNormalising:
     def test_every_way_of_writing_a_username_is_one_name(self, written):
         assert normalize_username(written) == "durov"
 
+    def test_the_shortcut_cannot_miss_a_prefix(self):
+        # normalize_username returns a name holding none of the decoration
+        # characters untouched. That is only sound while every prefix it would
+        # otherwise strip contains one of them, so this pins the two together
+        # rather than leaving the next prefix added to chance.
+        for prefix in _LINK_PREFIXES:
+            assert any(mark in prefix for mark in _DECORATION), prefix
+
+    def test_a_bare_name_is_already_what_it_normalizes_to(self):
+        for bare in ("durov", "a", "a_b", "name123", "_x", "Durov"):
+            assert normalize_username(bare) == bare.lower()
+
     def test_a_phone_number_is_its_digits(self):
         assert normalize_phone("+39 333 123-4567") == "393331234567"
         assert normalize_phone("nonsense") is None
@@ -187,6 +201,24 @@ class TestMarkedIds:
         assert back == peer_id
         assert coarse.is_user == kind.is_user
         assert coarse.is_channel == kind.is_channel
+
+    @pytest.mark.parametrize(
+        ("peer_id", "kind"),
+        [
+            (1001, PeerKind.USER),
+            (1001, PeerKind.BOT),
+            (3003, PeerKind.CHAT),
+            (2002, PeerKind.CHANNEL),
+            (2002, PeerKind.SUPERGROUP),
+        ],
+    )
+    def test_a_chat_spells_its_own_id_for_keeping(self, peer_id, kind):
+        chat = Chat(id=peer_id, kind=kind)
+        assert chat.marked_id == mark_id(peer_id, kind)
+        assert unmark_id(chat.marked_id)[0] == peer_id
+
+    def test_a_person_is_already_unambiguous(self):
+        assert User(id=1001).marked_id == 1001
 
     def test_the_bot_api_spelling_is_the_one_people_paste(self):
         assert mark_id(2002, PeerKind.CHANNEL) == -1000000002002
@@ -610,6 +642,93 @@ class TestResolving:
                 user_id=1001, access_hash=12345
             )
             assert (await invoker.peers.get(1001)).access_hash == 12345
+
+    async def test_a_chat_out_of_get_chat_goes_straight_back_in(self):
+        async with live() as (invoker, server):
+            # Nothing was learned first: the wrapper still holds the
+            # constructor it was built from, so the hash comes with it.
+            chat = Chat.from_raw(a_channel())
+            assert await resolve(invoker, chat) == types.InputPeerChannel(
+                channel_id=2002, access_hash=54321
+            )
+            assert server.asked == []
+
+    async def test_a_user_out_of_get_user_does_too(self):
+        async with live() as (invoker, server):
+            person = User.from_raw(a_user())
+            assert await resolve(invoker, person) == types.InputPeerUser(
+                user_id=1001, access_hash=12345
+            )
+            assert (await invoker.peers.get(1001)).access_hash == 12345
+
+    async def test_a_wrapper_with_nothing_kept_falls_back_to_the_cache(self):
+        async with live() as (invoker, server):
+            # Chat and User can be built without a constructor to keep, and
+            # then the id is all there is to go on.
+            bare = Chat(id=1001, kind=PeerKind.USER)
+            with pytest.raises(PeerNotFound):
+                await resolve(invoker, bare)
+            invoker.peers.learn(a_user())
+            assert await resolve(invoker, bare) == types.InputPeerUser(
+                user_id=1001, access_hash=12345
+            )
+
+    async def test_an_id_typed_as_text_is_an_id(self):
+        async with live() as (invoker, server):
+            invoker.peers.learn(a_user())
+            assert await resolve(invoker, "1001") == await resolve(invoker, 1001)
+            # And it never went out as a username to be refused.
+            assert server.asked == []
+
+    async def test_a_marked_id_as_text_works_the_same_way(self):
+        async with live() as (invoker, server):
+            invoker.peers.learn(a_channel())
+            assert await resolve(invoker, "-1000000002002") == (
+                types.InputPeerChannel(channel_id=2002, access_hash=54321)
+            )
+            assert server.asked == []
+
+    async def test_a_text_id_nobody_has_met_says_so_without_asking(self):
+        async with live() as (invoker, server):
+            with pytest.raises(PeerNotFound, match="Resolve them by username"):
+                await resolve(invoker, "9999")
+            assert server.asked == []
+
+    async def test_a_written_down_chat_comes_back_the_same_peer(self):
+        async with live() as (invoker, server):
+            # What a program stores between runs is one number, and this is the
+            # one that survives the trip: the id alone would come back a user.
+            invoker.peers.learn(a_channel())
+            chat = Chat.from_raw(a_channel())
+            assert await resolve(invoker, chat.marked_id) == await resolve(
+                invoker, chat
+            )
+
+    async def test_a_hand_built_group_is_not_read_as_a_person(self):
+        async with live() as (invoker, server):
+            # A basic group is reachable by id alone, but only once the id says
+            # it is one. The kind on the wrapper is what says so, and dropping
+            # it would turn 3003 into a user nobody has met.
+            group = Chat(id=3003, kind=PeerKind.CHAT)
+            assert await resolve(invoker, group) == types.InputPeerChat(chat_id=3003)
+            assert server.asked == []
+
+    async def test_a_message_is_not_a_peer_just_for_having_a_raw(self):
+        async with live() as (invoker, server):
+            # Message keeps its constructor on .raw as well, and its id counts
+            # messages rather than people. Reading it as a peer would name the
+            # wrong one quietly, so it stays a refusal.
+            posted = Message(
+                id=7,
+                raw=types.Message(
+                    id=7,
+                    peer_id=types.PeerUser(user_id=1001),
+                    date=1700000000,
+                    message="hello",
+                ),
+            )
+            with pytest.raises(TypeError):
+                await resolve(invoker, posted)
 
     async def test_a_bool_is_not_a_peer(self):
         async with live() as (invoker, server):

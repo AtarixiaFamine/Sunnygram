@@ -18,11 +18,12 @@ import pytest
 
 from mtproto_server import AUTH_KEY, ScriptedServer, Wire
 from sunnygram import filters
-from sunnygram.client import Client
+from sunnygram.client import Client, compose
 from sunnygram.dispatcher import Dispatcher, Handler, StopPropagation
 from sunnygram.errors import NoAnswer, RPCError, SunnygramError
 from sunnygram.network import Address
 from sunnygram.raw import functions, types
+from sunnygram.types import MemberStatus
 from sunnygram.storage import MemoryStorage, PeerKind, SessionState
 from sunnygram.types import (
     Button,
@@ -32,7 +33,7 @@ from sunnygram.types import (
     User,
     keyboard,
 )
-from sunnygram.updates import Event
+from sunnygram.updates import IDLE_CATCH_UP, Event
 
 ME = 777000
 OTHER = 1001
@@ -126,6 +127,69 @@ def wrap(
     )
     assert found is not None
     return found
+
+
+class Pretend:
+    """A stand-in for a client, which is all compose asks anything to be."""
+
+    def __init__(self, name: str, log: list[str], *, fails: bool = False) -> None:
+        self.name = name
+        self.log = log
+        self.fails = fails
+
+    async def start(self, **_options: Any) -> None:
+        if self.fails:
+            raise SunnygramError(f"{self.name} could not start")
+        self.log.append(f"start {self.name}")
+
+    async def stop(self) -> None:
+        self.log.append(f"stop {self.name}")
+
+
+class TestComposing:
+    """Several clients on one loop. compose makes the loop, so no async here."""
+
+    def test_they_start_in_order_and_stop_in_reverse(self):
+        log: list[str] = []
+
+        class Interrupts(Pretend):
+            async def start(self, **options: Any) -> None:
+                await super().start(**options)
+                # Stand in for the person pressing ctrl-c, once everything is up.
+                task = asyncio.current_task()
+                assert task is not None
+                asyncio.get_running_loop().call_later(0.02, task.cancel)
+
+        compose([Pretend("a", log), Pretend("b", log), Interrupts("c", log)])
+        assert log == [
+            "start a",
+            "start b",
+            "start c",
+            "stop c",
+            "stop b",
+            "stop a",
+        ]
+
+    def test_one_that_cannot_start_stops_the_ones_that_did(self):
+        log: list[str] = []
+        with pytest.raises(SunnygramError, match="could not start"):
+            compose([Pretend("a", log), Pretend("b", log, fails=True), Pretend("c", log)])
+        # b never started so it is not stopped, and c was never reached.
+        assert log == ["start a", "stop a"]
+
+
+class TestBuildingOne:
+    """Options the client holds for something underneath it."""
+
+    def a_client(self, **options: Any) -> Client:
+        return Client(MemoryStorage(), api_id=1, api_hash="hash", **options)
+
+    def test_the_silence_the_watchdog_waits_out_is_the_managers_own(self):
+        assert self.a_client().updates.idle_catch_up == IDLE_CATCH_UP
+
+    def test_and_it_can_be_moved_or_turned_off_from_here(self):
+        assert self.a_client(idle_catch_up=60).updates.idle_catch_up == 60
+        assert self.a_client(idle_catch_up=0).updates.idle_catch_up == 0
 
 
 class TestWrapping:
@@ -624,15 +688,19 @@ class ClientServer(ScriptedServer):
             elif isinstance(query, functions.messages.GetDialogs):
                 await self.answer(request.msg_id, self._dialogs(query))
             elif isinstance(query, functions.channels.GetParticipants):
+                if isinstance(query.filter, types.ChannelParticipantsAdmins):
+                    standing: Any = types.ChannelParticipantCreator(
+                        user_id=OTHER,
+                        admin_rights=types.ChatAdminRights(),
+                        rank="founder",
+                    )
+                else:
+                    standing = types.ChannelParticipant(user_id=OTHER, date=0)
                 await self.answer(
                     request.msg_id,
                     types.channels.ChannelParticipants(
                         count=1,
-                        participants=[
-                            types.ChannelParticipant(user_id=OTHER, date=0)
-                        ]
-                        if query.offset == 0
-                        else [],
+                        participants=[standing] if query.offset == 0 else [],
                         chats=[],
                         users=[a_user()] if query.offset == 0 else [],
                     ),
@@ -1105,6 +1173,33 @@ class TestChatsAndPeople:
                 )
             ]
             assert [user.id for user in found] == [OTHER]
+
+    async def test_members_come_back_with_their_standing(self):
+        async with live() as (client, server):
+            client.invoker.peers.learn(a_channel())
+            found = [
+                member
+                async for member in client.get_members(
+                    -1000000000000 - CHANNEL, limit=10
+                )
+            ]
+        assert [member.user_id for member in found] == [OTHER]
+        assert found[0].status is MemberStatus.MEMBER
+        assert found[0].chat_id == CHANNEL
+
+    async def test_the_creator_is_findable_without_a_raw_call(self):
+        """The short version of why get_members exists."""
+        async with live() as (client, server):
+            client.invoker.peers.learn(a_channel())
+            creator = None
+            async for member in client.get_members(
+                -1000000000000 - CHANNEL, kind="admins"
+            ):
+                if member.status is MemberStatus.CREATOR:
+                    creator = member
+        assert creator is not None
+        assert creator.user_id == OTHER
+        assert creator.title == "founder"
 
     async def test_a_chat_can_be_asked_about(self):
         async with live() as (client, server):

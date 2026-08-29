@@ -32,7 +32,7 @@ whether the code is generated or hand-written.
 | **2. Transport** | TCP plus four framings: intermediate, full, abridged, padded-intermediate. Obfuscation sits below the framing and above the socket, which nothing above it knows about. Proxies live here too: a tunnel is dealt with before the first frame and then forgotten. |
 | **3. MTProto session** | The encrypted-message envelope: server salt, session id, message id, sequence numbers, acks, containers, gzip, and recovery from `bad_server_salt` and `bad_msg_notification`. |
 | **4. Network / invoke** | Transport and session tied into a live connection with a single receive loop. Routes results to their callers, handles DC config and the `*_MIGRATE` errors, reconnects with backoff, turns `rpc_error` into typed exceptions. |
-| **5. Updates** | `pts` / `qts` / `seq` / `date`, per-channel `pts`, gap detection, and recovery via `updates.getDifference` and `getChannelDifference`. Single source of truth for update state. |
+| **5. Updates** | `pts` / `qts` / `seq` / `date`, per-channel `pts`, gap detection, and recovery via `updates.getDifference` and `getChannelDifference`. Single source of truth for update state. A container is judged in the order its counters say things happened rather than the order they were sent, and a stream that has gone silent for a quarter of an hour is caught up on anyway, that being the one fault the counters cannot see. |
 | **6. Storage** | Auth keys per DC, the update state, and the peer cache. Backends: sqlite, memory, and a portable string session. |
 | **7. Peer cache** | Resolves a username, an id or a phone to an `InputPeer` and caches the access hashes. A known peer must never cost a round trip. |
 | **8. File engine** | Chunked upload with the big-file path and parallel parts; download with CDN redirect handling and `FILE_REFERENCE_EXPIRED` refresh. |
@@ -227,6 +227,20 @@ so we can point at them in review.
   type and about 1.65x at fifty fields. Fifty is the end that matters, since `Message` is 49
   fields, `User` 51 and `Channel` 50, and those are most of what a running program reads.
   Quote the range instead of the top of it. The writing side has its own rule, P8.
+
+  A vector of one fixed-width primitive is read in one `struct` call rather than one call
+  per item. The reader decides that from the item reader the generated code already passes
+  it, so nothing in `raw/` had to change and nothing there knows about it. Like P3's other
+  half this is a range and not a number, and for the same reason: the saving is per item, so
+  it grows with the length. `benchmarks/rules.py` measures about 10x on a thousand longs and
+  level at four. Level is the right answer at the short end and is the reason this is worth
+  having: the common vector is a handful of ids and pays nothing either way, and the ones
+  that are worth anything are long. An earlier run read 1.13x at four and was measuring the
+  machine, which is what the alternating passes in that file are for. There are 128 such
+  fields in the pinned schema and they are the ones that come back
+  long: message ids, user ids, read receipts, every difference batch. The bounds check is
+  the same one, taken once over the whole span instead of once per item, so rule S3 is
+  unchanged.
 - **P4** The peer cache is mandatory and in-memory-fast. Resolving a known peer
   never hits the network. What it holds can go stale, so a call the server
   refuses on the grounds of the peer drops what was cached for it, everywhere
@@ -306,14 +320,19 @@ so we can point at them in review.
 
 ## Considered and not done
 
-Three things were considered and deliberately not done, written down so they are not
+Five things were considered and deliberately not done, written down so they are not
 rediscovered as oversights. Outgoing messages are not coalesced into
 `msg_container`, and server salts are not fetched before the current one expires. Both are
-real optimisations and both were measured against: the profile says this stack costs about
-twenty microseconds to code an update and twenty to wrap it, so frames and round trips are
-not where a program's time goes, and the container work in particular lands in the one file
-where `msg_id` and `seq_no` ordering is load-bearing. The trade was not worth it. If a real
-account ever shows otherwise, that is the evidence to reopen them with.
+real optimisations and both were measured against, and the container half of that was
+measured again on 2026-08-25 with a number that is worse than the one first recorded here.
+Coding `messages.sendMessage` is 8.2 us and wrapping it in the MTProto envelope is 30.5 us,
+so the envelope is nearly four times the coding rather than equal to it, and a burst of a
+hundred calls is 3.87 ms of blocking work and a hundred socket writes against roughly
+0.85 ms and one write in a container, which is 4.5x on the encode side. The conclusion is
+unchanged, because four milliseconds is not where a program's time goes and the work lands
+in the one file where `msg_id` and `seq_no` ordering is load-bearing, but the reason now
+carries the number it is actually based on. Bulk work is where it would show: a mass delete,
+a mass resolve, a takeout drain. That is the evidence to reopen it with.
 
 The third is `CTR.apply`, which XORs a whole buffer by turning it and the keystream into
 one integer each. For a 512 KiB file part that is a four-megabit bignum, which reads like
@@ -327,6 +346,27 @@ rather than a rewrite of the reference. The one real cost is transient memory, 4
 input at peak against about 2x if it were chunked, which is 2.2 MB for a part that only
 happens when no backend at all is installed. Not worth making the reference implementation
 harder to read for.
+
+The fourth is buffering an update that looks like a gap for half a second before asking
+what was missed, on the grounds that the one that fills it often arrives on its own. What
+made this look necessary was containers arriving with a count-of-zero update ahead of the
+one that moved the counter, and that is handled where it belongs, by judging a container in
+counter order instead of wire order, which costs nothing and cannot lose anything. What is
+left is the same reordering across two containers, which is rarer, and paying for it is one
+getDifference that comes back empty. Buying that back means holding updates in the one layer
+whose whole promise is that everything arrives once and in order, and extending the model in
+`test_updates_model.py` to prove the holding is safe. The reward is a round trip and the
+risk is the promise. Not taken.
+
+The fifth is generating a packed `to_bytes` for small fixed-width constructors, which
+measured 4.41x on `inputPeerUser` against going through `TLWriter`, most of it the writer
+allocation and the copy out of it. It was not taken because the measurement is of something
+that does not happen. `to_bytes` is called on the outermost object of an outgoing call and
+nowhere else; everything nested writes into the writer that call already opened, which is
+the shape rule P8 already covers and the shape this stack is fastest at. Of the 115 packed
+constructors only six are functions, and the only one sent with any regularity is
+`ping_delay_disconnect`, once every thirty seconds. Two microseconds every thirty seconds is
+not worth a second spelling of the writing in the generator.
 
 ## Decisions
 

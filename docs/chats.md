@@ -37,7 +37,42 @@ async for user in app.get_participants(chat_id, limit=200):
 
 async for user in app.get_participants(chat_id, query="anna"):
     ...
+
+async for user in app.get_participants(chat_id, kind="admins"):
+    ...
 ```
+
+`kind` asks for one sort of member instead of all of them:
+
+| | |
+| --- | --- |
+| `recent` | everyone, most recently active first. The default. |
+| `admins` | the administrators, and the creator among them |
+| `bots` | the bots in the chat |
+| `banned` | the people thrown out, who are no longer in the chat |
+| `restricted` | the people still in the chat but silenced |
+| `contacts` | members who are also your contacts |
+
+The last two are the one place worth reading twice. Telegram's own names for them are the
+other way round: its `kicked` filter is the people thrown out and its `banned` filter is
+the people still present but silenced. Sunnygram uses the readable word for each, the same
+convention the [rights](admin.md) use. `query=` narrows any of them that accepts a search.
+
+It is a fixed set of words rather than any string, so `kind="adminz"` is a type error at
+the call instead of a loop that quietly finds nobody.
+
+`get_participants` answers who is in a chat. `get_members` answers what each of them is in
+it, with the status, the rights an administrator was given, the custom title and who
+promoted them. Finding whoever made a chat is the short version of why it exists:
+
+```python
+async for member in app.get_members(chat_id, kind="admins"):
+    if member.status is MemberStatus.CREATOR:
+        print(member.user_id, member.title)
+```
+
+The two are separate calls rather than one handing back a pair, because a `User` is frozen
+and a standing belongs to a chat rather than to the person.
 
 A basic group is not paged: Telegram answers the whole membership at once, because a basic
 group is small by definition. A supergroup or channel is paged, and Telegram stops
@@ -85,20 +120,11 @@ me = await app.update_profile(first_name="Alex", about="building things")
 Only what you name changes. Leaving a field out leaves it alone; clearing one is passing
 an empty string.
 
-## What is not here
+## Running a chat
 
-Administration is not wrapped: promoting, banning, changing permissions, editing a title
-or a photo, creating a chat. All of it is reachable through [the raw API](raw-api.md),
-and none of it has a friendly method yet.
-
-```python
-from sunnygram.raw import functions, types
-
-await app.invoke(
-    functions.channels.EditBanned(
-        channel=types.InputChannel(channel_id=..., access_hash=...),
-        participant=await app.resolve("@somebody"),
-        banned_rights=types.ChatBannedRights(until_date=0, send_messages=True),
-    )
-)
-```
+Promoting and demoting, restricting, banning and kicking, titles, photos, descriptions,
+default permissions, slow mode, creating groups and channels, invite links, join requests
+and the admin log all have friendly methods. See [Running a chat](admin.md), which also
+explains the one trap in Telegram's rights: an administrator's powers are a list of what
+they can do and a member's are a list of what they cannot, and Sunnygram uses the readable
+convention for both.

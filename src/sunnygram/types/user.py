@@ -48,6 +48,16 @@ class User:
         )
 
     @property
+    def marked_id(self) -> int:
+        """The same id, for code that stores peers without knowing the kind.
+
+        A person's id is already unambiguous, so this is the id itself. It is
+        here so that anything holding either a Chat or a User can write down
+        one number without asking which it is holding.
+        """
+        return self.id
+
+    @property
     def mention(self) -> str:
         """A markdown link that names this person even without a username."""
         label = self.full_name or self.username or str(self.id)

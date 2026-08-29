@@ -257,3 +257,149 @@ class TestTheSmallPrint:
         spans = [Span("italic", 5, 9), Span("bold", 0, 4)]
         entities = spans_to_entities(spans, "some text here")
         assert [e.offset for e in entities] == [0, 5]
+
+
+class TestOffsetsPastTheBasicPlane:
+    """An entity counts in UTF-16 units, so anything above the BMP counts twice.
+
+    parse works that out by encoding, except for a run that is entirely ASCII,
+    where the count is the length and encoding it would be a copy made to learn
+    nothing. These pin the two halves of that against each other.
+    """
+
+    @pytest.mark.parametrize(
+        ("written", "expected"),
+        [
+            ("a **bold** b", ["bold"]),
+            # One emoji ahead of the run is two units, not one.
+            ("🎉 **bold** 🚀", ["bold"]),
+            ("🎉🎉🎉 **after six units**",
+             ["after six units"]),
+            ("**🎉 inside 🚀**", ["🎉 inside 🚀"]),
+            # Cyrillic is not ASCII but is still one unit each.
+            ("Привет **bold** x", ["bold"]),
+            ("a **b** c __i__ d `k` e", ["b", "i", "k"]),
+            ("𝔘𝔫 **x**", ["x"]),
+        ],
+    )
+    def test_an_entity_points_at_what_was_marked(self, written, expected):
+        plain, entities = parse(written)
+        assert [styled(plain, entity) for entity in entities] == expected
+
+    def test_a_run_of_emoji_round_trips(self):
+        written = "🎉 **bold** and __italic__ 🚀"
+        plain, entities = parse(written)
+        assert unparse(plain, entities) == written
+
+
+class TestQuotesComingBack:
+    """A blockquote is a line-level run, and > is only special where a line starts.
+
+    Both halves of that were wrong in unparse: the marker was written in
+    whatever order the entities happened to be in, so it could land inside a
+    code span and stop being a marker; and a literal > was never escaped, so
+    text that began with one came back as a quote with the character gone.
+    """
+
+    def test_a_quoted_code_span_keeps_its_marker_outside(self):
+        plain, entities = parse(">`a`")
+        assert unparse(plain, entities) == "> `a`"
+
+    def test_a_quote_holding_styled_text_round_trips(self):
+        written = "> **bold** and `code`"
+        plain, entities = parse(written)
+        assert unparse(plain, entities) == written
+
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "\\> a quote that is not one",
+            "\\>",
+            "first line\n\\> second",
+        ],
+    )
+    def test_a_literal_quote_marker_survives(self, written):
+        plain, entities = parse(written)
+        again = unparse(plain, entities)
+        assert parse(again)[0] == plain
+
+    def test_an_ordinary_greater_than_is_left_alone(self):
+        # Escaping every > would put backslashes through ordinary prose.
+        plain, entities = parse("a > b")
+        assert unparse(plain, entities) == "a > b"
+
+    def test_the_marker_is_escaped_inside_a_quote_too(self):
+        plain, entities = parse("> \\> not nested")
+        assert parse(unparse(plain, entities))[0] == plain
+
+
+class TestTagsNestRatherThanCross:
+    """Two runs starting on the same character have to open widest first.
+
+    Telegram does not promise what order entities arrive in, and writing them
+    out in whatever order they came produced crossed tags rather than nested
+    ones, which is not HTML at all.
+    """
+
+    @pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+    def test_the_wider_run_wraps_the_narrower_one(self, order):
+        pair = [
+            types.MessageEntityItalic(offset=0, length=3),
+            types.MessageEntityBold(offset=0, length=5),
+        ]
+        written = unparse("abcde", [pair[i] for i in order], mode="html")
+        assert written == "<b><i>abc</i>de</b>"
+
+    @pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+    def test_it_holds_for_markdown_too(self, order):
+        pair = [
+            types.MessageEntityItalic(offset=0, length=3),
+            types.MessageEntityBold(offset=0, length=5),
+        ]
+        written = unparse("abcde", [pair[i] for i in order])
+        assert written == "**__abc__de**"
+
+
+class TestAQuoteIsLineLevel:
+    """A blockquote can only begin where a line does and nothing inline is open.
+
+    Without the second half a > inside a run took the rest of the line into a
+    parse of its own while the run was still waiting to close, so both ended up
+    covering the same characters and the same styling was reported twice.
+    """
+
+    def test_a_marker_inside_a_run_is_just_a_character(self):
+        plain, entities = parse("__>__")
+        assert plain == ">"
+        assert kinds(entities) == [("MessageEntityItalic", 0, 1)]
+
+    def test_no_run_is_reported_twice(self):
+        plain, entities = parse("__>__d(>")
+        assert plain == ">d(>"
+        assert kinds(entities) == [("MessageEntityItalic", 0, 1)]
+
+    def test_a_quote_still_begins_a_line(self):
+        plain, entities = parse("> quoted")
+        assert plain == "quoted"
+        assert kinds(entities) == [("MessageEntityBlockquote", 0, 6)]
+
+    def test_a_quote_after_a_closed_run_still_begins(self):
+        plain, entities = parse("**b**\n> q")
+        assert plain == "b\nq"
+        assert ("MessageEntityBlockquote", 2, 1) in kinds(entities)
+
+    def test_a_quote_still_holds_styled_text(self):
+        plain, entities = parse("> **bold**")
+        assert plain == "bold"
+        assert sorted(kinds(entities)) == sorted(
+            [("MessageEntityBold", 0, 4), ("MessageEntityBlockquote", 0, 4)]
+        )
+
+    @pytest.mark.parametrize(
+        "written", ["__>__", "__>__d(>", "> quoted", "> **bold**"]
+    )
+    def test_each_of_them_round_trips(self, written):
+        plain, entities = parse(written)
+        again = unparse(plain, entities)
+        assert parse(again)[0] == plain
+        assert sorted(kinds(parse(again)[1])) == sorted(kinds(entities))

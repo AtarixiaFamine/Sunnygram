@@ -22,7 +22,7 @@ costs a call instead of a round trip through this machine.
 from __future__ import annotations
 
 from .cdn import CdnSession
-from .download import Progress, Refresh, download_file
+from .download import Progress, Refresh, download_file, stream_file
 from .location import FileSource, locate
 from .parts import DOWNLOAD_CHUNK, UPLOAD_PART, WORKERS
 from .ref import FileRef, decode_ref, file_ref, parse_ref
@@ -42,5 +42,6 @@ __all__ = [
     "file_ref",
     "locate",
     "parse_ref",
+    "stream_file",
     "upload_file",
 ]

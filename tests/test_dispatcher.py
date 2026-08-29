@@ -707,3 +707,45 @@ class TestWaitingForAnAnswer:
         stale.future.cancel()
         await dispatcher.feed(None, an_event(a_message(text="mine")))
         assert live.future.result().text == "mine"
+
+
+class TestWhatAFilterMayAnswerWith:
+    """A predicate can be sync or async and need not answer with a bool.
+
+    Filter.__call__ settles the plain True and False in front, because that is
+    what nearly every filter answers and asking inspect whether one is
+    awaitable costs more than the rest of the filter does. These are the three
+    ways through it, so the shortcut cannot quietly swallow the other two.
+    """
+
+    async def test_a_plain_bool_is_answered_as_it_is(self):
+        assert await filters.make(lambda client, event: True)(None, None) is True
+        assert await filters.make(lambda client, event: False)(None, None) is False
+
+    async def test_an_async_predicate_is_awaited(self):
+        async def slow(client: Any, event: Any) -> bool:
+            await asyncio.sleep(0)
+            return True
+
+        async def slow_no(client: Any, event: Any) -> bool:
+            await asyncio.sleep(0)
+            return False
+
+        assert await filters.make(slow)(None, None) is True
+        assert await filters.make(slow_no)(None, None) is False
+
+    async def test_something_merely_truthy_still_counts(self):
+        assert await filters.make(lambda client, event: "yes")(None, None) is True
+        assert await filters.make(lambda client, event: [])(None, None) is False
+        assert await filters.make(lambda client, event: None)(None, None) is False
+
+    async def test_an_async_predicate_composes_with_a_sync_one(self):
+        async def slow(client: Any, event: Any) -> bool:
+            await asyncio.sleep(0)
+            return True
+
+        both = filters.make(slow) & filters.make(lambda client, event: True)
+        either = filters.make(slow) | filters.make(lambda client, event: False)
+        assert await both(None, None) is True
+        assert await either(None, None) is True
+        assert await (~filters.make(slow))(None, None) is False

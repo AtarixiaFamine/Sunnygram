@@ -218,6 +218,40 @@ class TestVectors:
         with pytest.raises(TLDeserializationError):
             TLReader(w.getvalue()).read_vector(TLReader.read_int)
 
+    @pytest.mark.parametrize(
+        "reader, writer, values",
+        [
+            (TLReader.read_int, TLWriter.write_int, [-2**31, -1, 0, 7, 2**31 - 1]),
+            (TLReader.read_long, TLWriter.write_long, [-(2**63), 0, 2**63 - 1]),
+            (TLReader.read_double, TLWriter.write_double, [-1.5, 0.0, 3.25]),
+        ],
+    )
+    @pytest.mark.parametrize("repeats", [0, 1, 2, 500])
+    def test_a_vector_of_one_primitive_reads_whole(self, reader, writer, values, repeats):
+        # These take the one-struct-call path instead of one read per item, so
+        # the edges of every width are worth going over: the path is only a fast
+        # path if it agrees with the slow one everywhere.
+        wanted = (values * repeats)[: len(values) * repeats]
+        w = TLWriter()
+        w.write_vector(wanted, writer)
+        assert TLReader(w.getvalue()).read_vector(reader) == wanted
+
+    def test_a_truncated_primitive_vector_still_raises(self):
+        w = TLWriter()
+        w.write_vector([1, 2, 3], TLWriter.write_long)
+        truncated = w.getvalue()[:-6]
+        with pytest.raises(TLDeserializationError, match="truncated"):
+            TLReader(truncated).read_vector(TLReader.read_long)
+
+    def test_a_vector_of_bytes_is_not_taken_for_a_fixed_width_one(self):
+        w = TLWriter()
+        w.write_vector([b"a", b"bb", b"ccc"], TLWriter.write_bytes)
+        assert TLReader(w.getvalue()).read_vector(TLReader.read_bytes) == [
+            b"a",
+            b"bb",
+            b"ccc",
+        ]
+
 
 class TestObjects:
     def test_write_emits_the_constructor_id_first(self):

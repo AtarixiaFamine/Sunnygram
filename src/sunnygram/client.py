@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from datetime import datetime
 from types import TracebackType
 from typing import Any, Self
@@ -43,9 +43,10 @@ from .auth import get_me, log_in, log_out
 from .conversation import DEFAULT_TIMEOUT, Conversation, _ask_in, _wait_in
 from .dispatcher import Callback, Dispatcher, Handler, Kind, StopPropagation
 from .errors import SunnygramError
-from .files import download_file, upload_file
+from .files import download_file, stream_file, upload_file
 from .network import ClientInfo, Invoker, RateLimiter
 from .parser import parse as parse_text
+from .methods import FileKind, MemberFilter, StickerKind
 from .peers import Target, resolve, resolve_username, unmark_id
 from .plugins import load_into
 from .raw import base, functions, types
@@ -56,6 +57,8 @@ from .tl import TLFunction, TLResult
 from .transport import Proxy
 from .types import (
     AdminRights,
+    Boost,
+    BoostStatus,
     Chat,
     Dialog,
     Folder,
@@ -68,13 +71,63 @@ from .types import (
     User,
 )
 from .types.inline import CACHE_TIME as INLINE_CACHE
-from .updates import Event, UpdateManager
+from .updates import IDLE_CATCH_UP, Event, UpdateManager
 
 __all__ = ["Client"]
 
 # What Telegram shows in the account's list of active sessions when nothing
 # better is given. Worth setting to the program's own name.
 DEVICE = "Sunnygram"
+
+
+def _on_a_loop(main: Coroutine[Any, Any, Any], fast_loop: bool) -> Any:
+    """Make a loop, run one thing on it, and put it away.
+
+    The two places this library makes a loop rather than joining one, run and
+    compose, both come through here, so which kind of loop that is gets decided
+    once.
+    """
+    factory = loop_module.loop_factory() if fast_loop else None
+    try:
+        # Runner instead of asyncio.run because run only grew a loop_factory in
+        # 3.12 and this supports 3.11. It is the same machinery either way:
+        # asyncio.run is a Runner with the default.
+        with asyncio.Runner(loop_factory=factory) as runner:
+            return runner.run(main)
+    except KeyboardInterrupt:
+        return None
+
+
+def compose(clients: Sequence[Client], *, fast_loop: bool = True, **start: Any) -> None:
+    """Run several clients together on one loop, until interrupted.
+
+    run is one account's program. This is the same thing for a program holding
+    more than one, which otherwise means writing the loop and the shutdown by
+    hand and getting the shutdown wrong. Each client keeps its own session,
+    its own connection and its own handlers; all they share is the loop.
+
+        sunnygram.compose([first, second, third])
+
+    They are started one after another rather than at once, because starting
+    can ask for a code and two accounts asking at the same time is two prompts
+    on one terminal. Whatever started is stopped again on the way out, in the
+    reverse order, including when one of the later ones fails to start.
+    """
+
+    async def main() -> None:
+        started: list[Client] = []
+        try:
+            for client in clients:
+                await client.start(**start)
+                started.append(client)
+            await asyncio.Event().wait()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            return
+        finally:
+            for client in reversed(started):
+                await client.stop()
+
+    _on_a_loop(main(), fast_loop)
 
 
 class Client:
@@ -107,6 +160,7 @@ class Client:
         rate_limit: bool | RateLimiter = True,
         first_match: bool = False,
         message_cache: int = MESSAGE_CACHE,
+        idle_catch_up: float = IDLE_CATCH_UP,
         **options: Any,
     ) -> None:
         client = ClientInfo(
@@ -131,7 +185,7 @@ class Client:
             rate_limit=rate_limit,
             **options,
         )
-        self._updates = UpdateManager(self._invoker)
+        self._updates = UpdateManager(self._invoker, idle_catch_up=idle_catch_up)
         self._dispatcher = Dispatcher(first_match=first_match)
         self._pump: asyncio.Task[None] | None = None
         self._parse_mode = parse_mode
@@ -300,15 +354,7 @@ class Client:
             finally:
                 await self.stop()
 
-        factory = loop_module.loop_factory() if fast_loop else None
-        try:
-            # Runner instead of asyncio.run because run only grew a
-            # loop_factory in 3.12 and this supports 3.11. It is the same
-            # machinery either way: asyncio.run is a Runner with the default.
-            with asyncio.Runner(loop_factory=factory) as runner:
-                return runner.run(main())
-        except KeyboardInterrupt:
-            return None
+        return _on_a_loop(main(), fast_loop)
 
     def on_message(
         self, filters: filters_module.Filter | None = None, *, group: int = 0
@@ -1090,6 +1136,376 @@ class Client:
         """Give back a Stars payment, by the charge id it arrived with."""
         return await methods.refund_stars(self._invoker, user, charge_id)
 
+    async def get_stars_topup_options(self) -> Any:
+        """The bundles of Stars this account can buy, and what each costs."""
+        return await methods.stars_topup_options(self._invoker)
+
+    async def get_stars_gift_options(self, user: Target | None = None) -> Any:
+        """The bundles that can be bought for somebody else."""
+        return await methods.stars_gift_options(self._invoker, user)
+
+    async def get_stars_giveaway_options(self) -> Any:
+        """The bundles that can be put up as a giveaway prize."""
+        return await methods.stars_giveaway_options(self._invoker)
+
+    async def get_stars_subscriptions(
+        self, peer: Target = "me", **options: Any
+    ) -> Any:
+        """The recurring Stars charges a peer is signed up to."""
+        return await methods.stars_subscriptions(self._invoker, peer, **options)
+
+    async def cancel_stars_subscription(
+        self, subscription_id: str, peer: Target = "me"
+    ) -> bool:
+        """Stop paying for a subscription, from the subscriber's end."""
+        return await methods.cancel_stars_subscription(
+            self._invoker, subscription_id, peer
+        )
+
+    async def resume_stars_subscription(
+        self, subscription_id: str, peer: Target = "me"
+    ) -> bool:
+        """Undo a cancellation, while the period already paid for is running."""
+        return await methods.resume_stars_subscription(
+            self._invoker, subscription_id, peer
+        )
+
+    async def fulfill_stars_subscription(
+        self, subscription_id: str, peer: Target = "me"
+    ) -> bool:
+        """Pay a charge that was missed, once the balance can cover it."""
+        return await methods.fulfill_stars_subscription(
+            self._invoker, subscription_id, peer
+        )
+
+    async def cancel_bot_subscription(
+        self, user: Target, charge_id: str, **options: Any
+    ) -> bool:
+        """Cancel a subscription this bot is paid for, or put it back."""
+        return await methods.cancel_bot_subscription(
+            self._invoker, user, charge_id, **options
+        )
+
+    async def get_stars_revenue_stats(self, peer: Target = "me", **options: Any) -> Any:
+        """Earnings for a peer, as figures and as graphs to load separately."""
+        return await methods.stars_revenue_stats(self._invoker, peer, **options)
+
+    async def get_stars_withdrawal_url(
+        self, password: str, peer: Target = "me", **options: Any
+    ) -> str:
+        """A one-time link for taking earnings out, which needs the password."""
+        return await methods.stars_withdrawal_url(
+            self._invoker, password, peer, **options
+        )
+
+    async def get_stars_ads_url(self, peer: Target = "me") -> str:
+        """A link into the ad platform, for spending earnings rather than taking them."""
+        return await methods.stars_ads_url(self._invoker, peer)
+
+    async def get_stars_transactions_by_id(
+        self, ids: list[str], peer: Target = "me", **options: Any
+    ) -> Any:
+        """Look up particular ledger entries instead of paging the whole ledger."""
+        return await methods.stars_transactions_by_id(
+            self._invoker, ids, peer, **options
+        )
+
+    async def get_referral_bots(self, peer: Target = "me", **options: Any) -> Any:
+        """The affiliate programs this peer has joined, newest first."""
+        return await methods.referral_bots(self._invoker, peer, **options)
+
+    async def get_referral_bot(self, bot: Target, peer: Target = "me") -> Any:
+        """One affiliate program, if this peer has joined it."""
+        return await methods.referral_bot(self._invoker, bot, peer)
+
+    async def get_suggested_referral_bots(
+        self, peer: Target = "me", **options: Any
+    ) -> Any:
+        """Affiliate programs on offer that this peer has not joined."""
+        return await methods.suggested_referral_bots(self._invoker, peer, **options)
+
+    async def connect_referral_bot(self, bot: Target, peer: Target = "me") -> Any:
+        """Join an affiliate program, which mints the link that earns commission."""
+        return await methods.connect_referral_bot(self._invoker, bot, peer)
+
+    async def revoke_referral_link(self, link: str, peer: Target = "me") -> Any:
+        """Give up an affiliate link, which stops it earning and cannot be undone."""
+        return await methods.revoke_referral_link(self._invoker, link, peer)
+
+    async def accept_gift_offer(self, message_id: int) -> Any:
+        """Take an offer for one of your gifts, which hands it over and pays you."""
+        return await methods.accept_gift_offer(self._invoker, message_id)
+
+    async def add_to_gift_collection(
+        self,
+        collection_id: int,
+        gifts: Any,
+        peer: Target = "me",
+    ) -> Any:
+        """Put gifts on a shelf they are not already on."""
+        return await methods.add_to_gift_collection(
+            self._invoker,
+            collection_id,
+            gifts,
+            peer,
+        )
+
+    async def bid_on_gift_auction(
+        self,
+        gift_id: int,
+        amount: int,
+        **options: Any,
+    ) -> Any:
+        """Bid in an auction. This spends Stars, and a bid cannot be taken back."""
+        return await methods.bid_on_gift_auction(
+            self._invoker,
+            gift_id,
+            amount,
+            **options,
+        )
+
+    async def buy_gift_transfer(
+        self,
+        gift: Any,
+        to: Target,
+        peer: Target | None = None,
+    ) -> Any:
+        """Pay the transfer fee and give an upgraded gift away. This spends Stars."""
+        return await methods.buy_gift_transfer(self._invoker, gift, to, peer)
+
+    async def buy_gift_upgrade(
+        self,
+        gift: Any,
+        peer: Target | None = None,
+        **options: Any,
+    ) -> Any:
+        """Pay to upgrade a gift whose upgrade was not included. This spends Stars."""
+        return await methods.buy_gift_upgrade(self._invoker, gift, peer, **options)
+
+    async def buy_resale_gift(
+        self,
+        slug: str,
+        to: Target = "me",
+        **options: Any,
+    ) -> Any:
+        """Buy an upgraded gift somebody has listed. This spends Stars, or TON."""
+        return await methods.buy_resale_gift(self._invoker, slug, to, **options)
+
+    async def can_send_gift(self, gift_id: int) -> Any:
+        """Whether this account may send a particular gift, and why not if it may not."""
+        return await methods.can_send_gift(self._invoker, gift_id)
+
+    async def convert_gift(self, gift: Any, peer: Target | None = None) -> bool:
+        """Turn a gift back into Stars, which destroys it."""
+        return await methods.convert_gift(self._invoker, gift, peer)
+
+    async def craft_gift(self, gifts: Any, peer: Target | None = None) -> Any:
+        """Consume several gifts to make one. The ones put in are gone."""
+        return await methods.craft_gift(self._invoker, gifts, peer)
+
+    async def get_craftable_gifts(self, gift_id: int, **options: Any) -> Any:
+        """Which of the gifts held could go into crafting one of this kind."""
+        return await methods.craftable_gifts(self._invoker, gift_id, **options)
+
+    async def create_gift_collection(
+        self,
+        title: str,
+        gifts: Any,
+        peer: Target = "me",
+    ) -> Any:
+        """Make a new shelf with something already on it."""
+        return await methods.create_gift_collection(self._invoker, title, gifts, peer)
+
+    async def decline_gift_offer(self, message_id: int) -> Any:
+        """Turn an offer down. The offer ends; the gift stays where it is."""
+        return await methods.decline_gift_offer(self._invoker, message_id)
+
+    async def delete_gift_collection(
+        self,
+        collection_id: int,
+        peer: Target = "me",
+    ) -> bool:
+        """Get rid of a shelf. What was on it is still owned."""
+        return await methods.delete_gift_collection(self._invoker, collection_id, peer)
+
+    async def get_gift_auction_gifts(self, gift_id: int) -> Any:
+        """What this account has already won in auctions of one kind of gift."""
+        return await methods.gift_auction_gifts(self._invoker, gift_id)
+
+    async def get_gift_auction_state(
+        self,
+        auction: int | str,
+        **options: Any,
+    ) -> Any:
+        """Where an auction has got to, named by gift id or by slug."""
+        return await methods.gift_auction_state(self._invoker, auction, **options)
+
+    async def get_gift_auctions(self) -> Any:
+        """Auctions running now."""
+        return await methods.gift_auctions(self._invoker)
+
+    async def get_gift_catalogue(self) -> Any:
+        """Every gift on sale, which is the shop rather than anybody's shelf."""
+        return await methods.gift_catalogue(self._invoker)
+
+    async def get_gift_collections(self, peer: Target = "me") -> Any:
+        """The shelves a peer has sorted their gifts onto."""
+        return await methods.gift_collections(self._invoker, peer)
+
+    async def get_gift_upgrade_attributes(self, gift_id: int) -> Any:
+        """The full attribute pool for a kind of gift, with how rare each one is."""
+        return await methods.gift_upgrade_attributes(self._invoker, gift_id)
+
+    async def get_gift_upgrade_preview(self, gift_id: int) -> Any:
+        """What a gift of this kind could turn into, before one is owned."""
+        return await methods.gift_upgrade_preview(self._invoker, gift_id)
+
+    async def get_gift_withdrawal_url(
+        self,
+        gift: Any,
+        password: str,
+        peer: Target | None = None,
+    ) -> str:
+        """A one-time link for taking an upgraded gift out to the blockchain."""
+        return await methods.gift_withdrawal_url(self._invoker, gift, password, peer)
+
+    async def hide_gift(self, gift: Any, peer: Target | None = None) -> bool:
+        """Take a gift off the public shelf. It is still owned, just not displayed."""
+        return await methods.hide_gift(self._invoker, gift, peer)
+
+    async def pin_gifts(self, gifts: Any, peer: Target = "me") -> bool:
+        """Set which gifts sit at the top of the shelf, in the order given."""
+        return await methods.pin_gifts(self._invoker, gifts, peer)
+
+    async def remove_from_gift_collection(
+        self,
+        collection_id: int,
+        gifts: Any,
+        peer: Target = "me",
+    ) -> Any:
+        """Take gifts off a shelf. They are still owned, just not filed there."""
+        return await methods.remove_from_gift_collection(
+            self._invoker,
+            collection_id,
+            gifts,
+            peer,
+        )
+
+    async def rename_gift_collection(
+        self,
+        collection_id: int,
+        title: str,
+        peer: Target = "me",
+    ) -> Any:
+        """Change what a collection is called, and nothing else about it."""
+        return await methods.rename_gift_collection(
+            self._invoker,
+            collection_id,
+            title,
+            peer,
+        )
+
+    async def reorder_gift_collection(
+        self,
+        collection_id: int,
+        gifts: Any,
+        peer: Target = "me",
+    ) -> Any:
+        """Set the order gifts sit in on one shelf, which is the whole order."""
+        return await methods.reorder_gift_collection(
+            self._invoker,
+            collection_id,
+            gifts,
+            peer,
+        )
+
+    async def reorder_gift_collections(
+        self,
+        order: list[int],
+        peer: Target = "me",
+    ) -> bool:
+        """Set the order the shelves themselves sit in."""
+        return await methods.reorder_gift_collections(self._invoker, order, peer)
+
+    async def get_resale_gifts(self, gift_id: int, **options: Any) -> Any:
+        """Upgraded gifts of one kind that their owners have put up for sale."""
+        return await methods.resale_gifts(self._invoker, gift_id, **options)
+
+    async def get_saved_gift(self, gifts: Any, peer: Target | None = None) -> Any:
+        """Particular gifts by their handles, rather than paging somebody's shelf."""
+        return await methods.saved_gift(self._invoker, gifts, peer)
+
+    async def get_saved_gifts(self, peer: Target = "me", **options: Any) -> Any:
+        """The gifts a peer holds, newest first unless sorted by value."""
+        return await methods.saved_gifts(self._invoker, peer, **options)
+
+    async def send_gift(self, peer: Target, gift_id: int, **options: Any) -> Any:
+        """Buy a gift and give it to somebody. This spends Stars."""
+        return await methods.send_gift(self._invoker, peer, gift_id, **options)
+
+    async def send_gift_offer(
+        self,
+        peer: Target,
+        slug: str,
+        amount: int,
+        **options: Any,
+    ) -> Any:
+        """Offer to buy somebody's upgraded gift off them at a price."""
+        return await methods.send_gift_offer(
+            self._invoker,
+            peer,
+            slug,
+            amount,
+            **options,
+        )
+
+    async def set_gift_notifications(
+        self,
+        peer: Target,
+        enabled: bool = True,
+    ) -> bool:
+        """Whether to be told when a channel this account runs is sent a gift."""
+        return await methods.set_gift_notifications(self._invoker, peer, enabled)
+
+    async def set_gift_resale_price(
+        self,
+        gift: Any,
+        amount: int,
+        peer: Target | None = None,
+    ) -> Any:
+        """Put an upgraded gift up for sale, or change what it is listed at."""
+        return await methods.set_gift_resale_price(self._invoker, gift, amount, peer)
+
+    async def show_gift(self, gift: Any, peer: Target | None = None) -> bool:
+        """Put a gift on the public shelf, where anyone looking at the profile sees it."""
+        return await methods.show_gift(self._invoker, gift, peer)
+
+    async def transfer_gift(
+        self,
+        gift: Any,
+        to: Target,
+        peer: Target | None = None,
+    ) -> Any:
+        """Give an upgraded gift to somebody else, when the transfer is free."""
+        return await methods.transfer_gift(self._invoker, gift, to, peer)
+
+    async def get_unique_gift(self, slug: str) -> Any:
+        """One upgraded gift by its public name, which anybody can look up."""
+        return await methods.unique_gift(self._invoker, slug)
+
+    async def get_unique_gift_value(self, slug: str) -> Any:
+        """What an upgraded gift is reckoned to be worth, and what it last sold for."""
+        return await methods.unique_gift_value(self._invoker, slug)
+
+    async def upgrade_gift(
+        self,
+        gift: Any,
+        peer: Target | None = None,
+        **options: Any,
+    ) -> Any:
+        """Upgrade a gift whose upgrade was already paid for. This spends nothing."""
+        return await methods.upgrade_gift(self._invoker, gift, peer, **options)
+
     async def send_story(
         self,
         peer: Target,
@@ -1365,7 +1781,7 @@ class Client:
         caption: str = "",
         parse_mode: str | None = "",
         entities: list[Any] | None = None,
-        kind: str = "auto",
+        kind: FileKind = "auto",
         name: str | None = None,
         mime_type: str | None = None,
         thumb: Any = None,
@@ -1929,21 +2345,365 @@ class Client:
                     yield wrapped
 
     async def get_participants(
-        self, peer: Target, *, limit: int = 200, query: str = ""
+        self,
+        peer: Target,
+        *,
+        limit: int = 200,
+        query: str = "",
+        kind: MemberFilter = "recent",
     ) -> AsyncIterator[User]:
         """The people in a group or channel.
+
+        kind asks for one sort of member rather than all of them: "admins",
+        "bots", "banned" for the ones thrown out, "restricted" for the ones
+        still present but silenced, or "contacts". It is a fixed set of words,
+        so a misspelling is a type error rather than a filter that quietly
+        matches nobody.
 
         A channel with many members only lets a client see so far down the
         list, which is Telegram's rule instead of this one: past a few
         thousand the answer stops whether or not more were asked for.
         """
         async for page in methods.iter_participant_pages(
-            self._invoker, peer, limit=limit, query=query
+            self._invoker, peer, limit=limit, query=query, kind=kind
         ):
             for user in getattr(page, "users", ()):
                 wrapped = User.from_raw(user)
                 if wrapped is not None:
                     yield wrapped
+
+    async def get_members(
+        self,
+        peer: Target,
+        *,
+        limit: int = 200,
+        query: str = "",
+        kind: MemberFilter = "recent",
+    ) -> AsyncIterator[Member]:
+        """The same people as get_participants, with their standing attached.
+
+        get_participants answers who is in a chat. This answers what each of
+        them is in it: the status, the rights an administrator was given, the
+        custom title, who promoted them. Finding whoever made a chat is the
+        short version of why it exists:
+
+            async for member in app.get_members(chat, kind="admins"):
+                if member.status is MemberStatus.CREATOR:
+                    ...
+
+        The two are separate rather than one call handing back a pair because a
+        User is frozen, and a standing belongs to one chat rather than to the
+        person.
+        """
+        where = await self.resolve(peer)
+        chat_id = getattr(where, "channel_id", 0) or getattr(where, "chat_id", 0)
+        async for page in methods.iter_participant_pages(
+            self._invoker, peer, limit=limit, query=query, kind=kind
+        ):
+            found = getattr(page, "participants", None)
+            if found is None:
+                # A basic group answers with its whole full-chat form, and the
+                # membership is one level further in.
+                found = getattr(
+                    getattr(getattr(page, "full_chat", None), "participants", None),
+                    "participants",
+                    (),
+                )
+            for participant in found or ():
+                yield Member.from_raw(participant, chat_id=chat_id)
+
+    # ---- statistics -------------------------------------------------------
+
+    async def get_chat_stats(self, peer: Target, *, dark: bool = False) -> Any:
+        """What Telegram counts about a channel or a supergroup.
+
+        The two kinds are counted differently and answered by different calls,
+        and which one a chat needs is worked out here. Statistics start only
+        past a size Telegram picks and does not publish; below it the server
+        refuses, which is its rule and not this one.
+
+        The graphs in the answer are tokens rather than data. load_graph turns
+        one into the other.
+        """
+        return await methods.chat_stats(self._invoker, peer, dark=dark)
+
+    async def get_message_stats(
+        self, peer: Target, message_id: int, *, dark: bool = False
+    ) -> Any:
+        """Views and reactions for one post, as two graphs."""
+        return await methods.message_stats(self._invoker, peer, message_id, dark=dark)
+
+    async def get_story_stats(
+        self, peer: Target, story_id: int, *, dark: bool = False
+    ) -> Any:
+        """Views and reactions for one story, as two graphs."""
+        return await methods.story_stats(self._invoker, peer, story_id, dark=dark)
+
+    async def load_graph(self, token: str, *, x: int = 0) -> Any:
+        """Fetch a graph the statistics only handed back a token for."""
+        return await methods.load_graph(self._invoker, token, x=x)
+
+    async def get_public_forwards(
+        self, peer: Target, message_id: int, *, limit: int = 100
+    ) -> AsyncIterator[Message | Story]:
+        """Publicly, who reposted this.
+
+        A repost is a message in another public chat or a story, and Telegram
+        answers with both mixed together, so this yields whichever each one is
+        rather than dropping the kind it was not asked about.
+        """
+        async for page in methods.iter_public_forward_pages(
+            self._invoker, peer, message_id, limit=limit
+        ):
+            self._invoker.peers.learn_all(getattr(page, "chats", ()) or ())
+            self._invoker.peers.learn_all(getattr(page, "users", ()) or ())
+            for found in getattr(page, "forwards", ()) or ():
+                story = getattr(found, "story", None)
+                if story is not None:
+                    wrapped_story = Story.from_raw(story)
+                    if wrapped_story is not None:
+                        yield wrapped_story
+                    continue
+                wrapped = Message.from_raw(
+                    getattr(found, "message", None), client=self
+                )
+                if wrapped is not None:
+                    yield wrapped
+
+    # ---- boosts -----------------------------------------------------------
+
+    async def get_boosts_status(self, peer: Target) -> BoostStatus:
+        """What level a chat is at, and how many more boosts the next takes.
+
+        The count that matters is `needed`, which is not the difference between
+        two of the numbers Telegram sends: the next level's figure is measured
+        from zero, so reading it the obvious way is off by the boosts already
+        spent.
+        """
+        return BoostStatus.from_raw(await methods.boosts_status(self._invoker, peer))
+
+    async def get_my_boosts(self) -> Any:
+        """This account's boost slots, and what each is lent to."""
+        return await methods.my_boosts(self._invoker)
+
+    async def boost(self, peer: Target, *, slots: Sequence[int] | None = None) -> Any:
+        """Lend a chat one of this account's boost slots.
+
+        Naming no slots lets the server pick, which is what pressing the button
+        in an official client does.
+        """
+        return await methods.apply_boost(self._invoker, peer, slots=slots)
+
+    async def get_user_boosts(self, peer: Target, user: Target) -> list[Boost]:
+        """Which of one person's slots are lent to this chat."""
+        answer = await methods.user_boosts(self._invoker, peer, user)
+        self._invoker.peers.learn_all(getattr(answer, "users", ()) or ())
+        return [Boost.from_raw(one) for one in getattr(answer, "boosts", ()) or ()]
+
+    async def get_boosts(
+        self, peer: Target, *, limit: int = 100, gifts: bool = False
+    ) -> AsyncIterator[Boost]:
+        """Who is boosting a chat.
+
+        gifts narrows it to the ones that came from a giveaway or a gift rather
+        than from somebody spending a slot of their own.
+        """
+        async for page in methods.iter_boost_pages(
+            self._invoker, peer, limit=limit, gifts=gifts
+        ):
+            self._invoker.peers.learn_all(getattr(page, "users", ()) or ())
+            for one in getattr(page, "boosts", ()) or ():
+                yield Boost.from_raw(one)
+
+    # ---- shared folders ---------------------------------------------------
+
+    async def export_folder_link(
+        self, folder_id: int, *, title: str = "", peers: Sequence[Target]
+    ) -> Any:
+        """Give a folder a link, naming which of its chats the link carries.
+
+        Not every chat can be shared, so the ones in the link are named rather
+        than taken from the folder, and asking for one the server will not
+        share is refused instead of quietly dropped.
+        """
+        return await methods.export_folder_link(
+            self._invoker, folder_id, title=title, peers=peers
+        )
+
+    async def get_folder_links(self, folder_id: int) -> Any:
+        """Every link this folder has been given."""
+        return await methods.folder_links(self._invoker, folder_id)
+
+    async def edit_folder_link(
+        self,
+        folder_id: int,
+        slug: str,
+        *,
+        title: str | None = None,
+        peers: Sequence[Target] | None = None,
+    ) -> Any:
+        """Change a link's title, or which chats it carries.
+
+        What is left out is left alone.
+        """
+        return await methods.edit_folder_link(
+            self._invoker, folder_id, slug, title=title, peers=peers
+        )
+
+    async def delete_folder_link(self, folder_id: int, slug: str) -> Any:
+        """Take a link back. Whoever already joined stays where they are."""
+        return await methods.delete_folder_link(self._invoker, folder_id, slug)
+
+    async def preview_folder_link(self, slug: str) -> Any:
+        """What is behind somebody else's folder link, without joining it."""
+        return await methods.folder_link_preview(self._invoker, slug)
+
+    async def join_folder_link(self, slug: str, *, peers: Sequence[Target]) -> Any:
+        """Join a shared folder, taking the chats named and no others."""
+        return await methods.join_folder_link(self._invoker, slug, peers=peers)
+
+    async def get_folder_updates(self, folder_id: int) -> Any:
+        """Chats a shared folder has gained since this account joined it."""
+        return await methods.folder_updates(self._invoker, folder_id)
+
+    async def join_folder_updates(
+        self, folder_id: int, *, peers: Sequence[Target]
+    ) -> Any:
+        """Take the chats a shared folder has gained, or the ones named."""
+        return await methods.join_folder_updates(self._invoker, folder_id, peers=peers)
+
+    async def hide_folder_updates(self, folder_id: int) -> Any:
+        """Decline what a shared folder has gained, without leaving it."""
+        return await methods.hide_folder_updates(self._invoker, folder_id)
+
+    async def get_leave_suggestions(self, folder_id: int) -> Any:
+        """Which chats leaving this folder could reasonably take with it."""
+        return await methods.leave_suggestions(self._invoker, folder_id)
+
+    async def leave_folder(
+        self, folder_id: int, *, peers: Sequence[Target] = ()
+    ) -> Any:
+        """Leave a shared folder, and the chats named with it.
+
+        Naming none leaves the folder and stays in every chat, which is the
+        safe default: leaving chats is the half that cannot be undone quietly.
+        """
+        return await methods.leave_folder(self._invoker, folder_id, peers=peers)
+
+    # ---- sticker sets -----------------------------------------------------
+
+    async def create_sticker_set(
+        self,
+        owner: Target,
+        *,
+        title: str,
+        short_name: str,
+        stickers: Sequence[Any],
+        kind: StickerKind = "regular",
+        thumb: Any = None,
+        software: str | None = None,
+    ) -> Any:
+        """Make a set, owned by somebody, with its first stickers in it.
+
+        A set cannot be created empty. Build each entry with `sticker_item`,
+        which pairs an uploaded file with the emoji it is found by.
+        """
+        return await methods.create_sticker_set(
+            self._invoker,
+            owner,
+            title=title,
+            short_name=short_name,
+            stickers=stickers,
+            kind=kind,
+            thumb=thumb,
+            software=software,
+        )
+
+    async def upload_sticker(
+        self,
+        source: Any,
+        emoji: str,
+        *,
+        keywords: Sequence[str] = (),
+        mask_coords: Any = None,
+        mime_type: str = "image/webp",
+        **upload: Any,
+    ) -> Any:
+        """Turn a file off disk into a sticker ready to go in a set.
+
+        An upload is not a document yet, and a set is built out of documents,
+        so this does the registering step in between. Pass "video/webm" for an
+        animated sticker or "application/x-tgsticker" for a Lottie.
+        """
+        return await methods.upload_sticker(
+            self._invoker,
+            source,
+            emoji,
+            keywords=keywords,
+            mask_coords=mask_coords,
+            mime_type=mime_type,
+            **upload,
+        )
+
+    async def add_sticker(self, short_name: str, sticker: Any) -> Any:
+        """Put one more sticker at the end of a set."""
+        return await methods.add_sticker(self._invoker, short_name, sticker)
+
+    async def remove_sticker(self, sticker: Any) -> Any:
+        """Take a sticker out of whichever set it is in.
+
+        Named by the document, which already says which set that is.
+        """
+        return await methods.remove_sticker(self._invoker, sticker)
+
+    async def move_sticker(self, sticker: Any, position: int) -> Any:
+        """Move a sticker to a place in its set, counting from zero."""
+        return await methods.move_sticker(self._invoker, sticker, position)
+
+    async def edit_sticker(
+        self,
+        sticker: Any,
+        *,
+        emoji: str | None = None,
+        keywords: Sequence[str] | None = None,
+        mask_coords: Any = None,
+    ) -> Any:
+        """Change what a sticker already in a set is found by."""
+        return await methods.edit_sticker(
+            self._invoker,
+            sticker,
+            emoji=emoji,
+            keywords=keywords,
+            mask_coords=mask_coords,
+        )
+
+    async def replace_sticker(self, sticker: Any, replacement: Any) -> Any:
+        """Swap one sticker for another, keeping its place in the set."""
+        return await methods.replace_sticker(self._invoker, sticker, replacement)
+
+    async def rename_sticker_set(self, short_name: str, title: str) -> Any:
+        """Change a set's title. The short name, and so the link, stays."""
+        return await methods.rename_sticker_set(self._invoker, short_name, title)
+
+    async def delete_sticker_set(self, short_name: str) -> Any:
+        """Delete a whole set. Not undoable, and the short name is not freed."""
+        return await methods.delete_sticker_set(self._invoker, short_name)
+
+    async def set_sticker_set_thumb(
+        self, short_name: str, *, thumb: Any = None, document_id: int | None = None
+    ) -> Any:
+        """Choose the picture a set is shown by."""
+        return await methods.set_sticker_set_thumb(
+            self._invoker, short_name, thumb=thumb, document_id=document_id
+        )
+
+    async def suggest_short_name(self, title: str) -> Any:
+        """Ask the server for a free short name that suits this title."""
+        return await methods.suggest_short_name(self._invoker, title)
+
+    async def short_name_free(self, short_name: str) -> bool:
+        """Whether a sticker set short name can still be taken."""
+        return await methods.short_name_free(self._invoker, short_name)
 
     async def get_topics(
         self, peer: Target, *, limit: int = 100, query: str = ""
@@ -2126,6 +2886,25 @@ class Client:
             if found is not None:
                 options["refresh"] = self._refetching(found)
         return await download_file(self._invoker, what, **options)
+
+    def stream(self, what: Any, **options: Any) -> AsyncIterator[bytes]:
+        """Fetch a file a piece at a time, in order, instead of all at once.
+
+        For anything that can start work on the front of a file before the back
+        of it has arrived, and for anything too big to want in memory. Takes
+        offset and length for a byte range, and otherwise the same arguments as
+        download.
+
+        Not awaited, iterated:
+
+            async for piece in client.stream(message):
+                ...
+        """
+        if "refresh" not in options:
+            found = methods.media_origin(what)
+            if found is not None:
+                options["refresh"] = self._refetching(found)
+        return stream_file(self._invoker, what, **options)
 
     def _refetching(self, origin: tuple[int, int]) -> Any:
         """A way back to the message a file came from, for a stale reference."""

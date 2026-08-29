@@ -4,6 +4,305 @@ All notable changes to Sunnygram are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-27
+
+### Fixed
+
+- **A container is judged in the order its counters say things happened**, not the order
+  they were sent. Telegram routinely puts an update carrying `pts_count = 0` ahead of the
+  one that actually moved the counter, both carrying the same `pts`: a read receipt in front
+  of the message it acknowledges is the everyday case. Read in that order the receipt lands
+  short of its own `pts` and is indistinguishable from a gap, so every one of them cost an
+  `updates.getDifference` that came back with nothing to say. Nothing was ever lost, which is
+  why this went unnoticed, but on an account being read while it is being written to it was a
+  round trip per message under the lock everything else waits on.
+
+  The reordering is per counter and never across them. `pts`, `qts` and each channel count
+  separately, so their values are not comparable and one sort over the whole container would
+  interleave streams by numeric coincidence; instead each stream's updates are rearranged
+  among the places they already occupy. Everything else, counted or not, stays exactly where
+  the server put it, and a container already in counter order, which is nearly all of them,
+  is handed straight back.
+
+  Ordering hands each update's counter on to the judging rather than letting it be worked
+  out twice, because deciding which counter an update moves is several times the cost of the
+  ordering itself and is the only part of this worth measuring. `benchmarks/delta.py` is the
+  three shapes side by side: not ordering at all, ordering and working the counter out again
+  to judge with, and ordering that hands it on. Working it out twice costs several times what
+  the ordering does, which is more than the round trip this was written to save.
+
+- **CI linted against ruff's default rule set**, which widens between releases: ruff 0.16
+  folded pyupgrade, isort and more into its defaults, failing the build on code that had not
+  changed (1.1.0 reports 1473 errors under it, 1230 of them `__slots__` ordering in the
+  generated layer). The rule set is now pinned in `pyproject.toml`, so upgrading the linter
+  no longer changes what the project enforces.
+
+- **The import budget test measured the interpreter as much as the library.** It counts the
+  modules `import sunnygram` adds to `sys.modules`, and the ceiling of thirty was set on 3.13,
+  which preloads most of what the import reaches for. The same import costs 24 modules there
+  and 35 on 3.11, so CI failed on the two older versions in the matrix while passing on the
+  newest, with nothing about the library having changed. What means the same thing on every
+  version is how many of our own modules the import costs, which is six, and that is what the
+  test holds now. The total stays as a loose ceiling set for the oldest version in the matrix,
+  where it still catches a dependency being imported eagerly.
+
+- The comment on the bulk vector read quoted ratios no run had produced, 12x and 16x where
+  rule P3, `benchmarks/rules.py` and this file all say about 10x and level at four. Checking
+  a claim against the file that measures it is the whole point of quoting one.
+
+- **`kind="auto"` called a webp or a bmp a photo**, which Telegram does not accept as one:
+  jpg, jpeg and png are the whole list, and anything else offered as a photo comes back
+  `PHOTO_EXT_INVALID`. webp is the format a sticker is made of, so a send that never named
+  a kind failed on exactly the files a caller was least likely to have checked. Both
+  classify as documents now, which is the kind that carries them intact, and `docs/files.md`
+  says which extensions guess their way to a photo instead of leaving it to be discovered.
+
+### Added
+
+- **Star gifts**, in a new `methods/gifts.py`: thirty-nine methods covering the catalogue,
+  what a peer owns, upgrading, transferring, resale, collections, auctions, offers and
+  crafting. The second and largest slice of the payments surface.
+
+  Three conventions carry the whole module. **A gift is named three ways and every method
+  takes all of them**: Telegram addresses one by the service message it arrived in for a
+  person, by a saved id beside the channel for a channel, and by a public slug once it has
+  been upgraded. An int alone is a message id, an int with a peer beside it is a channel's
+  saved id, a string is a slug with or without the link wrapped round it, and a raw
+  constructor passes through. Nothing above has to know which spelling the call underneath
+  wanted.
+
+  **Anything that spends money says so in its name.** Half of these go through an invoice,
+  which fetches a payment form and submits it, and the Stars leave the balance with nothing
+  further asked. Every one of those is `send_` or `buy_` and nothing else is. The pair that
+  makes it matter is upgrading: `upgrade_gift` spends nothing because whoever sent the gift
+  paid for the upgrade too, and `buy_gift_upgrade` pays for one that was not. Same operation,
+  different funding, and the name is the only thing that says which. `transfer_gift` and
+  `buy_gift_transfer` are the same pair for the same reason.
+
+  **One schema call that does five things is spelled as five methods.**
+  `payments.updateStarGiftCollection` renames, adds, removes and reorders through four
+  optional lists, and passing three Nones and one list is not an API.
+
+  The filters on `get_saved_gifts` are spelled as what to keep where the schema has both
+  halves of a pair, and keep the schema's `exclude_` spelling where it has only one side,
+  because inventing a positive name for a flag with no complement would be describing
+  something the server does not offer.
+
+- **Telegram Stars beyond paying with them**, in a new `methods/stars.py`: seventeen methods
+  covering subscriptions, revenue and affiliate programs, which were previously reachable
+  only through `invoke`. The first slice of the payments surface; gifts, giveaways and
+  auctions are still to come.
+
+  Four things the shape of it is arguing with. **A balance belongs to a peer, not to the
+  session**, since a channel has its own purse, so every call here takes one and defaults to
+  the account rather than assuming it. **A subscription can be cancelled from either end and
+  they are different calls**: the subscriber cancels by subscription id and a bot cancels by
+  the charge id it was paid under, so `cancel_stars_subscription` and
+  `cancel_bot_subscription` are separate names rather than one with a flag deciding which
+  handle it was given. **Stars and TON are the same calls with a flag**, because Telegram
+  added a second currency to the revenue side rather than a second set of methods, and
+  inventing the distinction here would be inventing one the server does not make. And
+  **`get_suggested_referral_bots(by=...)` takes a word** where the schema has two independent
+  booleans that are meaningless together.
+
+  `get_stars_withdrawal_url` takes the account password and never sends it: `password_proof`
+  in `methods/account.py` is new alongside it and turns a password into the SRP proof the
+  server actually wants, so nothing outside that module has to know a second factor is an
+  exchange rather than a string. A test asserts the password reaches no request on the wire.
+
+- **A stream that goes silent is caught up on anyway.** Every other recovery in the update
+  layer starts from something the server said. This one starts from the server saying
+  nothing, which is the one fault the counters cannot see: they only move when an update
+  moves them, so a connection that has quietly stopped carrying updates leaves them exactly
+  where a quiet account would, and the ping loop cannot tell the two apart because it proves
+  the socket is alive, which was never in doubt. After a quarter of an hour without a word,
+  the manager asks. `Client(idle_catch_up=...)` moves it or turns it off, and
+  `app.updates.resyncs` counts the times it has had to.
+
+- **`client.stream`**, which hands a file over a piece at a time, in order, instead of all
+  at once. For anything that can start on the front of a file before the back of it has
+  arrived, and for anything too big to want in memory. `offset` and `length` take a byte
+  range, the same pair an HTTP range asks in, so serving a seek passes the numbers straight
+  through; an offset in the middle of a chunk is rounded down and the head of the first piece
+  dropped for you. Only the range asked for is fetched, so a hundred bytes off a sixty
+  megabyte file is one round trip. One piece is in flight at a time, which is the trade and
+  not an oversight: pieces have to be handed over in order, so fetching ahead only helps if
+  they are held, and not holding them is the reason to be here. `download` is still the
+  faster call when the whole file is what is wanted.
+
+- **`sunnygram.compose`**, which runs several clients on one loop until interrupted. `run` is
+  one account's program; this is the same thing for a program holding more than one, which
+  otherwise meant writing the loop and the shutdown by hand and getting the shutdown wrong.
+  Each client keeps its own session, connection and handlers, and all they share is the loop.
+  They start one after another rather than at once, because starting can ask for a code and
+  two accounts asking at the same moment is two prompts on one terminal, and whatever started
+  is stopped again in reverse on the way out, including when one of the later ones fails to
+  start.
+
+### Changed
+
+- **A vector of one fixed-width primitive is read in one `struct` call** instead of one call
+  per item. `benchmarks/rules.py` measures about 10x on a thousand longs and level at four,
+  and level at the short end is the point rather than a disappointment: the common vector is
+  a handful of ids and pays nothing either way, and the ones worth anything are long. There
+  are 128 such fields in the pinned schema and they are the ones that come back long, being
+  message ids, user ids, read receipts and every difference batch. The reader decides this
+  from the item reader the generated code already passes it, so nothing in `raw/` changed and
+  nothing there knows about it. The bounds check is the same one, taken once over the whole
+  span instead of once per item, so rule S3 is unchanged.
+
+## [1.1.0] - 2026-08-23
+
+### Added
+
+Four surfaces that were reachable only through `invoke` now have friendly methods, which
+was the last of the coverage gap: **statistics**, **boosts**, **shared folders** and
+**sticker sets**. Around sixty-five methods in total.
+
+- **Statistics.** `get_chat_stats` picks between the channel call and the supergroup call
+  from the chat, so asking the wrong one is not a mistake available to make. Also
+  `get_message_stats`, `get_story_stats`, `get_public_forwards` and `load_graph`, since a
+  graph in an answer is a token rather than data and needs a second call to become one.
+  `get_public_forwards` yields a `Message` or a `Story` depending on which each repost is,
+  rather than dropping the kind not asked about.
+- **Boosts**, with a `BoostStatus` type carrying the arithmetic Telegram leaves to the
+  reader. `needed` is not `next_level_boosts - current_level_boosts`: the next level is
+  measured from zero, so subtracting the two is off by every boost already spent. Also
+  `get_boosts`, `get_my_boosts`, `get_user_boosts` and `boost`, plus a `Boost` type whose
+  absent multiplier reads as one rather than none.
+- **Shared folders**: exporting a link, previewing and joining somebody else's, taking or
+  declining the chats a folder gains later, and leaving. Leaving names no chats by default,
+  because leaving chats is the half that cannot be undone quietly.
+- **Sticker sets**: created, added to, reordered, retitled, rethumbed and deleted, with
+  `kind="regular" | "mask" | "emoji"` as one word where the schema has two independent
+  flags. `upload_sticker` does the step that is easy to miss: a set is built out of
+  documents and an upload is not one yet, so it registers the file and hands back something
+  a set can actually hold.
+- **`PeerCache.kind_of`**, which answers what sort of peer an id belongs to from memory
+  and without a round trip. What `chat_stats` uses to choose its call.
+
+- **An id spelled as text now resolves as an id.** Ids travel as strings, out of config
+  files and command arguments and other programs' output, and one used to go to the server
+  as a username and come back refused. A username has to start with a letter, so nothing
+  written entirely in digits is one and there is nothing here to guess at. Both spellings
+  work, `"777000"` and `"-1001234567890"` alike. A phone number is still the case that
+  needs its `+`.
+
+- **`Chat.marked_id` and `User.marked_id`**, the id in the spelling that says what it is
+  without anything beside it. `id` stays the one the protocol uses, which is what a raw
+  call wants and what not to keep on its own: `3003` on its own could be a person or a
+  small group, and only the kind next to it settles which. This is the pair put back
+  together, for anything writing a peer into a database or a config.
+
+### Fixed
+
+- **A `>` inside a styled run is a character, not a quote.** A blockquote is line-level,
+  and it was allowed to begin anywhere a line did, including in the middle of a run that
+  had not closed yet. The quote then took the rest of the line into a parse of its own
+  while the run was still waiting, so the two ended up covering the same characters and
+  the same styling was reported twice: `__>__` came back as two italics over a blockquote
+  rather than one italic holding a `>`. It now begins only where a line does *and* nothing
+  inline is open.
+
+- **Text that begins with `>` no longer loses the character.** A literal `>` at the start
+  of a line was written back out unescaped, so reading a message and sending it again
+  turned the line into a quote and dropped the marker: `"> a"` came back as `"a"`. It is
+  escaped where a line begins, and only there, since escaping every `>` would put
+  backslashes through ordinary prose.
+
+- **Runs that start on the same character now nest instead of crossing.** Both writers
+  wrote opening marks in whatever order the entities arrived in, and Telegram does not
+  promise an order. In HTML that produced `<i><b>abc</i>de</b>`, which is crossed tags
+  rather than nested ones. In markdown it put a blockquote's marker inside a code span,
+  where it stopped being a marker at all and `` >`a` `` came back as code reading `"> a"`.
+  The widest run opens first now, and a line-level one ahead of an inline one covering the
+  same characters.
+
+- **A download with a byte limit no longer writes past it.** When the size is not known
+  in advance the limit can only be enforced as the pieces arrive, and it was checked after
+  each piece had been handed over rather than before. A caller downloading into a file had
+  already written the piece that crossed the line, so a 5000 byte limit could leave 8192
+  bytes on disk before saying the limit was reached.
+
+- **An `Invoker` built to attempt nothing says so.** `attempts=0` left the retry loop with
+  nothing to raise at the end and came apart on the assertion that said so, which under
+  `-O` is not an assertion any more but a `TypeError` naming nothing. A negative `backoff`
+  is refused for the same reason. Every other constructor in the library already checked
+  its arguments this way.
+
+### Changed
+
+- **Filters are about 60% quicker.** `Filter.__call__` asked `inspect.isawaitable`
+  whether the answer needed awaiting, and for the plain `True` or `False` almost every
+  filter returns, that question cost more than the whole rest of the filter: it falls
+  through to an abstract base class check to say no. Two identity tests settle it in
+  front, and anything else still goes the long way. This runs once per filter per handler
+  per update, so it is the most repeated question the library asks.
+
+- **Reading markdown is about 58% quicker.** Two things ran once per character of every
+  message parsed: the running UTF-16 offset was worked out by encoding the character, and
+  the delimiter table was walked with a `startswith` per token. An offset in an entirely
+  ASCII run is its length, and a character that is not the first character of any
+  delimiter cannot begin one.
+
+- **Writing markdown back out is about 30% quicker**, and HTML a little. Escaping was
+  eight chained `str.replace` passes per character, which is one `str.translate` table
+  built once; both writers encoded the text to UTF-16 a second time to count what they
+  had already counted; and both rebuilt a small lookup dict for every entity.
+
+- **About 10% off every TL read.** `read_bytes` and `read_raw` built a memoryview for
+  each slice and then copied out of it, where `tobytes` does the same in one object.
+  Strings are roughly a third of the cost of reading a payload.
+
+- **`normalize_username` got about 27% off `learn`**, which is the function every users
+  vector on the update path goes through. It was lowercasing the whole string once per
+  prefix it checked, seven throwaway copies to answer a question about the first few
+  characters, and it now walks the prefix list only for a name that carries something
+  worth stripping. Behaviour is unchanged, checked against the previous implementation
+  over 50,000 generated strings.
+
+- **A `Chat` or a `User` now names a peer**, so anything `get_chat`, `get_user`, a dialog,
+  a member or a message hands back goes straight into the next call. `resolve` already took
+  the raw constructors those wrap; refusing the wrapped form meant every read followed by
+  an act had to unwrap by hand, and the obvious unwrap, `.id`, is the one that throws the
+  access hash away and leaves the call depending on the cache. The wrapper is resolved
+  through the constructor it kept, which costs nothing and cannot miss.
+
+## [1.0.1] - 2026-08-23
+
+### Added
+
+- **`get_members`**, which answers what each person is in a chat rather than only who they
+  are: status, rights, custom title, who promoted them. Whoever created a chat is now one
+  loop over `kind="admins"` looking for `MemberStatus.CREATOR`, where before it meant
+  building a `channels.getParticipants` call with the admins filter and reading the
+  participant constructors back by hand.
+- **`get_participants` takes a `kind`**, so asking a chat for its administrators, its bots,
+  the people thrown out, the people silenced, or the members who are also contacts no longer
+  means dropping to `channels.getParticipants` by hand. `banned` and `restricted` are said
+  the readable way round, because Telegram's own two names for them are the opposite of what
+  they read as: its `kicked` is someone thrown out and its `banned` is someone still in the
+  chat but silenced. Same convention the rights already use.
+
+### Changed
+
+- **`Target` is a union instead of `Any`.** The first argument of nearly every client method
+  now says what it accepts, so an editor offers the right shapes and a checker refuses the
+  wrong ones. The union is declared for type checkers only and stays `Any` at run time, so
+  importing the library still loads six modules and none of the schema (rule P7). Narrowing
+  an annotation cannot change behaviour, but code that was passing something a peer cannot be
+  made from will now say so at the call rather than at the round trip.
+- **`send_file(kind=...)` is a `Literal`** of the seven words it always accepted, so
+  `kind="documnet"` is a type error rather than a document sent as a photo.
+
+### Fixed
+
+- `docs/chats.md` claimed administration was not wrapped and showed how to hand-build a
+  `channels.editBanned` call for it. It has been wrapped for a long time, with twenty-one
+  methods and a page of its own, and the stale section pointed people at the trap that page
+  exists to explain.
+- The README said "around ninety client methods". There are 135.
+
 ## [1.0.0] - 2026-08-23
 
 ### Added
@@ -959,4 +1258,7 @@ wrapped.
 - No obfuscated transport, so no MTProxy.
 - The crypto has not been independently audited. See `SECURITY.md`.
 
+[1.2.0]: https://github.com/AtarixiaFamine/Sunnygram/releases/tag/v1.2.0
+[1.1.0]: https://github.com/AtarixiaFamine/Sunnygram/releases/tag/v1.1.0
+[1.0.1]: https://github.com/AtarixiaFamine/Sunnygram/releases/tag/v1.0.1
 [1.0.0]: https://github.com/AtarixiaFamine/Sunnygram/releases/tag/v1.0.0

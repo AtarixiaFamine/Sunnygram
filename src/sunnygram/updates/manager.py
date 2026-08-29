@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Self
@@ -34,7 +36,7 @@ from ..network import Invoker
 from ..raw import functions, types
 from ..storage import UpdateState
 from ..tl import TLObject
-from .state import Verdict, apply, counter_of, judge, seq_verdict
+from .state import Counter, Verdict, apply, counter_of, judge, seq_verdict
 
 __all__ = ["Event", "UpdateManager"]
 
@@ -51,6 +53,13 @@ MAX_SLICES = 100
 # What to ask for in one channel difference. A hundred is what a client that is
 # not a bot is allowed.
 CHANNEL_LIMIT = 100
+
+# How long a stream may stay silent before we go and ask anyway. A connection
+# that has quietly stopped carrying updates looks exactly like an account with
+# nothing happening on it, and the ping loop cannot tell them apart: it proves
+# the socket is alive, which is the thing that was never in doubt. Telegram
+# documents a quarter of an hour as the point to stop assuming.
+IDLE_CATCH_UP = 15 * 60.0
 
 # Bookkeeping instead of news. Both of these say something about a call we made
 # ourselves, and whoever made it already has the answer in hand, so delivering
@@ -88,6 +97,9 @@ class UpdateManager:
         "_channel_limit",
         "_lost",
         "_resyncs",
+        "_idle",
+        "_seen",
+        "_watchdog",
     )
 
     def __init__(
@@ -96,6 +108,7 @@ class UpdateManager:
         *,
         events_queue: int = EVENTS_QUEUE,
         channel_limit: int = CHANNEL_LIMIT,
+        idle_catch_up: float = IDLE_CATCH_UP,
     ) -> None:
         self._invoker = invoker
         self._events: asyncio.Queue[Event] = asyncio.Queue(events_queue)
@@ -112,6 +125,11 @@ class UpdateManager:
         # looked. A number that has moved means something never reached us.
         self._lost = 0
         self._resyncs = 0
+        self._idle = idle_catch_up
+        # Monotonic, because this measures a silence and a clock that is put
+        # back would read as one that never ends.
+        self._seen = time.monotonic()
+        self._watchdog: asyncio.Task[None] | None = None
 
     def __repr__(self) -> str:
         state = self.state
@@ -176,6 +194,16 @@ class UpdateManager:
         return self._resyncs
 
     @property
+    def idle_catch_up(self) -> float:
+        """How long the stream may stay silent before we go and ask anyway.
+
+        Zero turns the watchdog off, which is the right answer only for a
+        program that would rather miss the news than make a call it did not
+        ask for.
+        """
+        return self._idle
+
+    @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
@@ -197,14 +225,21 @@ class UpdateManager:
             await self._fetch_state()
         elif catch_up:
             await self.catch_up()
+        self._seen = time.monotonic()
         self._task = asyncio.create_task(self._drain(), name="sunnygram-updates")
+        if self._idle > 0:
+            self._watchdog = asyncio.create_task(
+                self._watch(), name="sunnygram-updates-idle"
+            )
 
     async def stop(self) -> None:
         """Stop following, and write down where we got to."""
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        watchdog, self._watchdog = self._watchdog, None
+        for running in (task, watchdog):
+            if running is not None:
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
         await self._invoker.peers.flush()
         await self._invoker.save()
 
@@ -263,6 +298,34 @@ class UpdateManager:
             await self._invoker.save()
             raise
 
+    async def _watch(self) -> None:
+        """Ask what happened when nothing has arrived for a long time.
+
+        Every other recovery in this layer starts from something the server
+        said. This one starts from the server saying nothing, which is the one
+        fault the counters cannot see: they only move when an update moves them,
+        so a stream that has stopped entirely leaves them exactly where a quiet
+        account would. Asking costs one call a quarter of an hour at worst.
+        """
+        while True:
+            silence = self._idle - (time.monotonic() - self._seen)
+            if silence > 0:
+                await asyncio.sleep(silence)
+                continue
+            _log.info(
+                "no updates for %.0f seconds, asking what was missed", self._idle
+            )
+            self._seen = time.monotonic()
+            self._resyncs += 1
+            try:
+                async with self._lock:
+                    await self._difference()
+            except (SunnygramError, TimeoutError) as failure:
+                # Same trade as _drain: the stream is worth more than this
+                # attempt, so the next one tries again.
+                self._failures += 1
+                _log.warning("could not catch up after a silence: %s", failure)
+
     async def _recover_losses(self) -> None:
         """Catch up on whatever the connection had to throw away.
 
@@ -288,6 +351,9 @@ class UpdateManager:
         await self._difference()
 
     async def _feed(self, container: TLObject) -> None:
+        # Anything at all arriving is proof the stream is still running, which
+        # is what the watchdog above is waiting to be told.
+        self._seen = time.monotonic()
         if isinstance(container, types.UpdatesTooLong):
             # The server has given up on telling us one at a time.
             await self._difference()
@@ -318,8 +384,8 @@ class UpdateManager:
             if verdict is Verdict.GAP:
                 await self._difference()
                 return
-            for update in container.updates:
-                await self._one(update, users, chats)
+            for update, counter in _in_counter_order(container.updates):
+                await self._one(update, users, chats, counter)
             # Only ever forwards: an update in the middle may have gone and
             # fetched a difference, which leaves these further along than the
             # container that started it.
@@ -328,7 +394,7 @@ class UpdateManager:
             return
 
         if isinstance(container, types.UpdateShort):
-            await self._one(container.update, {}, {})
+            await self._one(container.update, {}, {}, counter_of(container.update))
             self.state.date = max(self.state.date, container.date)
             return
 
@@ -341,7 +407,7 @@ class UpdateManager:
             ),
         ):
             # A message compact enough that the server skipped the container.
-            await self._one(container, {}, {})
+            await self._one(container, {}, {}, counter_of(container))
             self.state.date = max(self.state.date, container.date)
             return
 
@@ -349,9 +415,18 @@ class UpdateManager:
         # is dropped instead of guessed at.
 
     async def _one(
-        self, update: TLObject, users: dict[int, TLObject], chats: dict[int, TLObject]
+        self,
+        update: TLObject,
+        users: dict[int, TLObject],
+        chats: dict[int, TLObject],
+        counter: Counter | None,
     ) -> None:
-        """Judge one update against the counters, then deliver or recover."""
+        """Judge one update against the counters, then deliver or recover.
+
+        The counter is handed in rather than worked out here, because whoever
+        put this container in order had to work it out already and deciding
+        which counter an update moves is the expensive part of reading one.
+        """
         if isinstance(update, types.UpdateChannelTooLong):
             # The server saying this channel moved on too far to be told about
             # one message at a time. The pts it carries is the channel's latest
@@ -364,7 +439,6 @@ class UpdateManager:
 
         # Some updates keep no order at all. Someone coming online has no
         # history, so there is nothing to be out of step with.
-        counter = counter_of(update)
         if counter is not None:
             verdict = judge(self.state, counter)
             if verdict is Verdict.OLD:
@@ -608,3 +682,64 @@ class UpdateManager:
 def _by_id(objects: list[Any]) -> dict[int, TLObject]:
     """Users or chats, keyed by the id an update will refer to them by."""
     return {item.id: item for item in objects if hasattr(item, "id")}
+
+
+def _in_counter_order(
+    updates: Sequence[TLObject],
+) -> list[tuple[TLObject, Counter | None]]:
+    """One container's updates, in the order their counters say they happened.
+
+    The server does not always put them that way. A read receipt advances no
+    counter of its own, so it carries the pts it leaves behind and a count of
+    zero, and it is routinely sent ahead of the message that actually got there
+    first. Judged in that order the receipt lands short of its own pts and looks
+    exactly like a gap, which costs a getDifference that finds nothing.
+
+    So each update is keyed by where its counter started rather than where it
+    ended, which is the one number that is the same for both of them and puts
+    them back in the order they happened.
+
+    Only ever within one counter. pts, qts and each channel count separately, so
+    their values are not comparable and sorting the container as a whole would
+    interleave streams by numeric coincidence. Instead each stream's updates are
+    rearranged among the places they already occupy, which leaves every other
+    update, counted or not, exactly where the server put it.
+
+    The counter comes back alongside its update because working out which one an
+    update moves is the expensive part of reading a container, several times the
+    cost of the ordering itself, and doing it here and again in _one made the
+    receive path measurably slower than not ordering at all.
+
+    A container already in counter order is handed straight back, which is
+    almost all of them: the scan that decides costs nothing over the pass that
+    was needed anyway, and only a container that is really out of order pays for
+    the permutation.
+    """
+    pairs: list[tuple[TLObject, Counter | None]] = []
+    latest: dict[tuple[str, int], int] = {}
+    behind = False
+    for update in updates:
+        counter = counter_of(update)
+        pairs.append((update, counter))
+        if counter is None:
+            continue
+        stream = (counter.kind, counter.channel_id)
+        mark = counter.value - counter.count
+        if mark < latest.get(stream, mark):
+            behind = True
+        latest[stream] = mark
+    if not behind:
+        return pairs
+
+    marks: dict[int, int] = {}
+    slots: dict[tuple[str, int], list[int]] = {}
+    for index, (_, counter) in enumerate(pairs):
+        if counter is None:
+            continue
+        marks[index] = counter.value - counter.count
+        slots.setdefault((counter.kind, counter.channel_id), []).append(index)
+    ordered = list(pairs)
+    for where in slots.values():
+        for slot, index in zip(where, sorted(where, key=marks.__getitem__)):
+            ordered[slot] = pairs[index]
+    return ordered

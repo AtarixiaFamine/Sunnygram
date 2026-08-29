@@ -409,6 +409,28 @@ class UpdateStream(RuleBasedStateMachine):
         message_id = self.server.add()
         self._feed(self._container(self.server.update_for(message_id)))
 
+    @rule()
+    def deliver_behind_a_read_receipt(self) -> None:
+        """The same, with the container in the order the server really uses.
+
+        A read receipt advances nothing, so it carries the pts it leaves behind
+        and a count of zero, and it goes out ahead of the message that got there
+        first. Read in that order it is short of its own pts and looks like a
+        gap. It carries no message id, so it is not one of the things the
+        invariants count: what this rule is here for is that the message beside
+        it still arrives once, in order, whichever way round the two are put.
+        """
+        message_id = self.server.add()
+        update = self.server.update_for(message_id)
+        receipt = types.UpdateReadHistoryInbox(
+            peer=types.PeerUser(user_id=7),
+            max_id=message_id,
+            still_unread_count=0,
+            pts=update.pts,
+            pts_count=0,
+        )
+        self._feed(self._container(receipt, update))
+
     @rule(count=st.integers(min_value=1, max_value=5))
     def withhold_then_deliver(self, count: int) -> None:
         """Things happen we are never told of, then something else does.

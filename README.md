@@ -89,7 +89,7 @@ across with the key, and the source file is opened read-only.
 
 ## What it does
 
-Around ninety client methods:
+Around 260 client methods:
 
 | | |
 | --- | --- |
@@ -98,11 +98,17 @@ Around ninety client methods:
 | Act | edit, delete, forward, pin, react, vote, mark read, typing |
 | Administer | promote, restrict, ban, titles, photos, permissions, slow mode, invite links, join requests, admin log |
 | Talk to bots | press a button by its label, inline queries, start with a parameter |
+| Pay | invoices in money or Stars, subscriptions, revenue, withdrawals, affiliate programs |
+| Gifts | the catalogue, sending, upgrading, transferring, resale, collections, auctions, crafting |
 | Be a bot | keyboards, callback queries, inline mode both ways, the command menu |
 | Account | sessions listed and terminated, the second factor, privacy, usernames |
 | Forums | topics listed, searched, opened, renamed, closed, pinned |
 | Payments | invoices, Telegram Stars, balance, ledger, refunds |
 | Stories | posted, edited, pinned, taken down, read |
+| Statistics | channel, supergroup, post and story figures, and the graphs behind them |
+| Boosts | a chat's level, who is boosting it, and lending it one of your slots |
+| Shared folders | a folder given a link, joined, kept up to date, left |
+| Sticker sets | made, added to, reordered, retitled, deleted |
 | Later | any send queued by datetime or `WHEN_ONLINE` |
 
 Twenty-one kinds of event, from messages and edits to inline queries, join requests, reactions
@@ -126,8 +132,8 @@ The stack under it, layer by layer:
 | `sunnygram.auth` | phone and code, 2FA over SRP, bot token, QR |
 | `sunnygram.errors` | all 780 documented errors, generated, hung off their status codes |
 
-**Not here:** calls above the raw layer, TLS-disguised MTProxy, and account registration, which
-is deliberate and permanent. Sunnygram signs in to accounts that already exist.
+**Not here:** calls above the raw layer, and TLS-disguised MTProxy. Account registration is
+deliberate and permanent: Sunnygram signs in to accounts that already exist.
 
 ## Design
 

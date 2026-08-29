@@ -134,6 +134,28 @@ class TestStarting:
         with pytest.raises(SunnygramError, match="not been started"):
             await invoker.invoke(a_call())
 
+    @pytest.mark.parametrize("attempts", [0, -1])
+    def test_a_call_that_would_never_be_attempted_is_refused(self, attempts):
+        # Without this the retry loop runs no attempts, has nothing to raise at
+        # the end, and comes apart on the assertion that says so, which under
+        # -O is not even an assertion any more.
+        with pytest.raises(ValueError, match="attempted at least once"):
+            Invoker(
+                seeded(),
+                client=CLIENT,
+                connector=Network().connect,
+                attempts=attempts,
+            )
+
+    def test_a_backwards_backoff_is_refused(self):
+        with pytest.raises(ValueError, match="cannot be negative"):
+            Invoker(
+                seeded(),
+                client=CLIENT,
+                connector=Network().connect,
+                backoff=-1.0,
+            )
+
     async def test_a_session_from_the_other_network_is_refused(self):
         state = SessionState(dc_id=2, test_mode=True)
         state.set_auth_key(2, AUTH_KEY)

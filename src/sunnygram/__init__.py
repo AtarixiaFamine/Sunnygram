@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from .errors import SunnygramError
 from .tl import TLObject, set_constructor_resolver
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "WHEN_ONLINE",
@@ -40,6 +40,8 @@ __all__ = [
     "Blocked",
     "Button",
     "CallbackQuery",
+    "Boost",
+    "BoostStatus",
     "Chat",
     "ChosenResult",
     "Client",
@@ -77,6 +79,7 @@ __all__ = [
     "Typing",
     "User",
     "adopt_session",
+    "compose",
     "file_ref",
     "filters",
     "force_reply",
@@ -94,6 +97,7 @@ if TYPE_CHECKING:
     from . import loop as loop
     from . import plugins as plugins
     from .client import Client as Client
+    from .client import compose as compose
     from .conversation import Conversation as Conversation
     from .dispatcher import Kind as Kind
     from .dispatcher import StopPropagation as StopPropagation
@@ -108,6 +112,8 @@ if TYPE_CHECKING:
     from .transport import Proxy as Proxy
     from .types import AdminRights as AdminRights
     from .types import Blocked as Blocked
+    from .types import Boost as Boost
+    from .types import BoostStatus as BoostStatus
     from .types import Button as Button
     from .types import CallbackQuery as CallbackQuery
     from .types import Chat as Chat
@@ -141,10 +147,13 @@ if TYPE_CHECKING:
 
 _LAZY = {
     "WHEN_ONLINE": ("sunnygram.methods", "WHEN_ONLINE"),
+    "compose": ("sunnygram.client", "compose"),
     "AdminRights": ("sunnygram.types", "AdminRights"),
     "Blocked": ("sunnygram.types", "Blocked"),
     "Button": ("sunnygram.types", "Button"),
     "CallbackQuery": ("sunnygram.types", "CallbackQuery"),
+    "Boost": ("sunnygram.types", "Boost"),
+    "BoostStatus": ("sunnygram.types", "BoostStatus"),
     "Chat": ("sunnygram.types", "Chat"),
     "ChosenResult": ("sunnygram.types", "ChosenResult"),
     "Client": ("sunnygram.client", "Client"),

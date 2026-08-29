@@ -34,6 +34,7 @@ __all__ = [
     "check_username",
     "current_password",
     "password_check",
+    "password_proof",
     "privacy",
     "remove_password",
     "sessions",
@@ -316,6 +317,23 @@ def _verifier(
         int.from_bytes(hashed, "big"),
         int.from_bytes(algorithm.p, "big"),
     ).to_bytes(len(algorithm.p), "big")
+
+
+async def password_proof(invoker: Invoker, password: str) -> base.InputCheckPasswordSRP:
+    """Prove a password to the server for a call that demands one.
+
+    A handful of calls outside this module will not proceed without the account
+    password, withdrawing money being the obvious one, and they want the proof
+    rather than the password. This fetches what the server wants proved against
+    and answers with the proof, so nothing else has to know that a second factor
+    is an SRP exchange rather than a string.
+    """
+    state = await invoker.invoke(functions.account.GetPassword())
+    if not isinstance(state, types.account.Password):
+        raise SunnygramError(
+            f"expected the password settings, got {type(state).__name__}"
+        )
+    return await _prove(state, password)
 
 
 async def _prove(state: types.account.Password, password: str) -> base.InputCheckPasswordSRP:

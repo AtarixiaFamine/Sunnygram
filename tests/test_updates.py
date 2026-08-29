@@ -389,6 +389,80 @@ class TestGaps:
             assert server.difference_calls == 1
 
 
+class TestContainerOrder:
+    """Rule: a container is judged in the order its counters say, not wire order.
+
+    Telegram routinely puts an update carrying pts_count=0 ahead of the one that
+    actually advanced the counter, and both carry the same pts. Judged as they
+    arrive, the first of the pair lands short of its own pts and is
+    indistinguishable from a gap, so the manager would fetch a difference that
+    has nothing to tell it.
+    """
+
+    async def test_a_read_receipt_ahead_of_its_message_is_not_a_gap(self):
+        async with live() as (manager, server, _):
+            await manager.start()
+            receipt = types.UpdateReadHistoryInbox(
+                peer=types.PeerUser(user_id=7),
+                max_id=1,
+                still_unread_count=0,
+                pts=101,
+                pts_count=0,
+            )
+            await server.send(container(receipt, new_message(101), seq=11))
+            events = await drain(manager, 2)
+            assert [type(event.update) for event in events] == [
+                types.UpdateNewMessage,
+                types.UpdateReadHistoryInbox,
+            ]
+            assert manager.state.pts == 101
+            assert server.difference_calls == 0
+
+    async def test_two_streams_in_one_container_do_not_reorder_each_other(self):
+        state = UpdateState(pts=100, date=1700000000, seq=10, channels={55: 4})
+        async with live(state) as (manager, server, _):
+            await manager.start(catch_up=False)
+            # The channel is far behind the common stream in raw pts, so sorting
+            # the container as a whole would drag it to the front.
+            await server.send(
+                container(new_message(101), _channel_message(pts=5), seq=11)
+            )
+            events = await drain(manager, 2)
+            assert [type(event.update) for event in events] == [
+                types.UpdateNewMessage,
+                types.UpdateNewChannelMessage,
+            ]
+            assert server.difference_calls == 0
+
+
+class TestGoingQuiet:
+    async def test_a_stream_that_stops_is_caught_up_on_anyway(self):
+        async with live(idle_catch_up=0.05) as (manager, server, _):
+            await manager.start()
+            assert server.difference_calls == 0
+            # Nothing is sent at all. The socket is fine and the counters have
+            # nothing to notice, which is exactly the fault this covers.
+            await asyncio.wait_for(_until(lambda: server.difference_calls > 0), 5)
+            assert manager.resyncs >= 1
+
+    async def test_an_update_arriving_puts_the_silence_back_to_zero(self):
+        async with live(idle_catch_up=0.4) as (manager, server, _):
+            await manager.start()
+            for pts in range(101, 106):
+                await server.send(container(new_message(pts), seq=0))
+                await asyncio.sleep(0.1)
+            await drain(manager, 5)
+            # Half a second of traffic, none of it more than a tenth of a second
+            # apart, so the watchdog should never have fired.
+            assert server.difference_calls == 0
+
+    async def test_it_can_be_turned_off(self):
+        async with live(idle_catch_up=0) as (manager, server, _):
+            await manager.start()
+            await asyncio.sleep(0.15)
+            assert server.difference_calls == 0
+
+
 class TestTheOtherCounter:
     """qts, and the sixteen kinds of update that moved it with nothing looking.
 

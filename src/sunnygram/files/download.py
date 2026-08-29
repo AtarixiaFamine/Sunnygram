@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ from .cdn import CdnSession, is_stale_token
 from .location import FileSource, locate
 from .parts import DOWNLOAD_CHUNK, WORKERS, check_download_chunk, in_parallel
 
-__all__ = ["Progress", "Refresh", "download_file"]
+__all__ = ["Progress", "Refresh", "download_file", "stream_file"]
 
 Progress = Callable[[int, int], None]
 
@@ -103,6 +103,57 @@ async def download_file(
     if into is None:
         return await _into_memory(state, chunk_size, workers, progress, limit)
     return await _into_file(state, Path(into), chunk_size, workers, progress, limit)
+
+
+async def stream_file(
+    invoker: Invoker,
+    source: Any,
+    *,
+    offset: int = 0,
+    length: int = 0,
+    chunk_size: int = DOWNLOAD_CHUNK,
+    progress: Progress | None = None,
+    refresh: Refresh | None = None,
+    cdn: bool = True,
+) -> AsyncIterator[bytes]:
+    """Hand a file over a piece at a time, in order, from wherever it is asked.
+
+    download_file answers with the whole thing, which is what most callers want
+    and is why it fetches several pieces at once. This is for the ones that do
+    not: serving a video to something that is going to play it, feeding a
+    decoder, answering a range request, looking at the first kilobyte of
+    something enormous. None of those want the file, they want the front of it,
+    and waiting for the back is the whole cost.
+
+    offset and length are the byte range, the same pair an HTTP range asks in,
+    and both are in whole bytes. Telegram only answers on a chunk boundary, so
+    an offset in the middle of one starts from the boundary below and the head
+    of the first piece is dropped here rather than being the caller's problem.
+    length of zero means to the end.
+
+    One piece is in flight at a time, and that is the trade this makes rather
+    than an oversight: pieces have to be handed over in order, so fetching
+    ahead only helps if they are held, and holding them is the thing the caller
+    came here to avoid.
+    """
+    check_download_chunk(chunk_size)
+    if offset < 0 or length < 0:
+        raise ValueError("a byte range is not negative")
+    found = locate(source)
+    state = _Fetcher(invoker, found, refresh, cdn=cdn)
+
+    skip = offset % chunk_size
+    sent = 0
+    async for _, piece in _in_order(state, chunk_size, progress, 0, offset - skip):
+        if skip:
+            piece, skip = piece[skip:], 0
+        if length and sent + len(piece) > length:
+            piece = piece[: length - sent]
+        if piece:
+            yield piece
+            sent += len(piece)
+        if length and sent >= length:
+            return
 
 
 async def _into_memory(
@@ -197,6 +248,7 @@ async def _in_order(
     chunk_size: int,
     progress: Progress | None,
     limit: int,
+    start: int = 0,
 ) -> Any:
     """Fetch a file whose length no one knows, one piece after another.
 
@@ -204,17 +256,21 @@ async def _in_order(
     there is nothing to be gained by asking for two at once: the second might
     be past the end and there would be no way to tell that from a gap.
     """
-    offset = 0
+    offset = start
     while True:
         piece = await state.fetch(offset, chunk_size)
         if piece:
-            yield offset, piece
-            offset += len(piece)
-            if limit and offset > limit:
+            # Refused before it is handed over rather than after. A caller
+            # writing to a file has already written whatever it was given, so
+            # checking afterwards would leave a whole chunk past the limit on
+            # disk before saying the limit was reached.
+            if limit and offset + len(piece) > limit:
                 raise FileTooLarge(
                     f"this file is past the {limit} byte limit given and its "
                     "size was not known in advance"
                 )
+            yield offset, piece
+            offset += len(piece)
             if progress is not None:
                 progress(offset, 0)
         if len(piece) < chunk_size:

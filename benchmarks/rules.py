@@ -366,6 +366,47 @@ def check_the_twins_agree() -> None:
             assert getattr(one, field) == getattr(other, field), field
 
 
+def bench_the_bulk_vector() -> dict[int, float]:
+    """P3's other half: a vector of one primitive read in one struct call.
+
+    The twin is the loop that used to be there, spelled out, because the fast
+    path is chosen inside read_vector and there is no way to ask for the old one
+    back. Both are checked against each other before either is timed.
+    """
+    measured: dict[int, float] = {}
+    for count in (4, 1000):
+        writer = TLWriter()
+        wanted = [1234567890123 + i for i in range(count)]
+        writer.write_vector(wanted, TLWriter.write_long)
+        payload = writer.getvalue()
+
+        def slow(payload: bytes = payload, count: int = count) -> Any:
+            reader = TLReader(payload)
+            reader.read_int(signed=False)
+            reader.read_int()
+            return [reader.read_long() for _ in range(count)]
+
+        def fast(payload: bytes = payload) -> Any:
+            return TLReader(payload).read_vector(TLReader.read_long)
+
+        assert slow() == fast() == wanted
+        rounds = 20000 // count + 20
+        # Alternating, for the reason the module docstring gives: a machine that
+        # speeds up or slows down mid-run is otherwise read as a result.
+        old: list[float] = []
+        new: list[float] = []
+        for _ in range(PASSES):
+            old.append(rate(slow, rounds))
+            new.append(rate(fast, rounds))
+        before, after = statistics.median(old), statistics.median(new)
+        measured[count] = after / before
+        print(
+            f"  {'Vector<long>, ' + str(count) + ' items':<40} "
+            f"{before:>12,.0f}/s -> {after:>12,.0f}/s   {after / before:>4.2f}x"
+        )
+    return measured
+
+
 if __name__ == "__main__":
     check_the_twins_agree()
     print(f"median of {PASSES} alternating passes, one reader per {PER_BUFFER}\n")
@@ -387,3 +428,11 @@ if __name__ == "__main__":
     print(f"  P8: writing inputPeerUser is {packed:.2f}x what it was, and it is")
     print("  written on nearly every outgoing call, because nearly every call")
     print("  names a peer.")
+    print()
+    print("== P3: a vector of one primitive, read in one struct call ==")
+    vectors = bench_the_bulk_vector()
+    print()
+    print("  P3 quotes about 10x on a thousand longs and level at four.")
+    print(f"  This run measured {vectors[1000]:.2f}x and {vectors[4]:.2f}x. Four is the")
+    print("  end to watch: most vectors on the wire are short, and what this needs")
+    print("  to be there is free, not fast.")

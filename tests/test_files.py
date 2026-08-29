@@ -21,7 +21,13 @@ import pytest
 
 from mtproto_server import AUTH_KEY, ScriptedServer, Wire
 from sunnygram.errors import FileTooLarge, SunnygramError, UploadRefused
-from sunnygram.files import FileSource, download_file, locate, upload_file
+from sunnygram.files import (
+    FileSource,
+    download_file,
+    locate,
+    stream_file,
+    upload_file,
+)
 from sunnygram.files.parts import check_download_chunk, check_upload_part, in_parallel
 from sunnygram.network import Address, ClientInfo, Invoker
 from sunnygram.raw import functions, types
@@ -455,6 +461,119 @@ class TestDownloading:
             with pytest.raises(FileTooLarge):
                 await download_file(invoker, a_document(size=9000), limit=1000)
             assert network.dc(HOME).asked == []
+
+    async def test_a_file_of_unknown_length_stops_at_the_limit(self):
+        # The size is not known in advance, so the limit can only be enforced
+        # as the pieces arrive, and it has to be enforced before one is handed
+        # over: a caller writing to disk has already written what it was given.
+        data = os.urandom(10000)
+        async with live(content=data) as (invoker, network):
+            source = FileSource(
+                location=locate(a_document()).location, dc_id=HOME, size=0
+            )
+            with pytest.raises(FileTooLarge):
+                await download_file(invoker, source, chunk_size=4096, limit=5000)
+
+    async def test_nothing_past_the_limit_reaches_the_disk(self, tmp_path):
+        # What the check being in front of the yield actually buys. Behind it,
+        # the piece that crossed the limit had already been written by the time
+        # anyone said the limit was crossed.
+        data = os.urandom(10000)
+        into = tmp_path / "capped.bin"
+        async with live(content=data) as (invoker, network):
+            source = FileSource(
+                location=locate(a_document()).location, dc_id=HOME, size=0
+            )
+            with pytest.raises(FileTooLarge):
+                await download_file(
+                    invoker, source, chunk_size=4096, limit=5000, into=into
+                )
+        assert not into.exists() or into.stat().st_size <= 5000
+
+    async def test_a_file_of_unknown_length_exactly_at_the_limit_is_kept(self):
+        data = os.urandom(8192)
+        async with live(content=data) as (invoker, network):
+            source = FileSource(
+                location=locate(a_document()).location, dc_id=HOME, size=0
+            )
+            got = await download_file(
+                invoker, source, chunk_size=4096, limit=len(data)
+            )
+            assert got == data
+
+
+class TestStreaming:
+    """In order, a piece at a time, from wherever it is asked for."""
+
+    async def test_the_whole_file_arrives_in_order(self):
+        data = os.urandom(20000)
+        async with live(content=data) as (invoker, network):
+            pieces = [
+                piece
+                async for piece in stream_file(
+                    invoker, a_document(size=len(data)), chunk_size=4096
+                )
+            ]
+            assert b"".join(pieces) == data
+            # In order means one piece per chunk, not one piece for the file.
+            assert len(pieces) > 1
+
+    async def test_a_byte_range_is_honoured_exactly(self):
+        data = bytes(range(256)) * 100
+        async with live(content=data) as (invoker, network):
+            for offset, length in ((0, 10), (1, 10), (4095, 2), (4096, 8192), (9000, 0)):
+                got = b"".join(
+                    [
+                        piece
+                        async for piece in stream_file(
+                            invoker,
+                            a_document(size=len(data)),
+                            offset=offset,
+                            length=length,
+                            chunk_size=4096,
+                        )
+                    ]
+                )
+                wanted = data[offset : offset + length] if length else data[offset:]
+                assert got == wanted, (offset, length)
+
+    async def test_a_file_of_unknown_length_streams_to_the_end(self):
+        data = os.urandom(10000)
+        async with live(content=data) as (invoker, network):
+            source = FileSource(
+                location=locate(a_document()).location, dc_id=HOME, size=0
+            )
+            got = b"".join(
+                [piece async for piece in stream_file(invoker, source, chunk_size=4096)]
+            )
+            assert got == data
+
+    async def test_it_stops_asking_once_the_range_is_covered(self):
+        data = os.urandom(60000)
+        async with live(content=data) as (invoker, network):
+            home = network.dc(HOME)
+            got = b"".join(
+                [
+                    piece
+                    async for piece in stream_file(
+                        invoker, a_document(size=len(data)), length=100, chunk_size=4096
+                    )
+                ]
+            )
+            assert got == data[:100]
+            # The whole point: one chunk fetched, not fifteen.
+            fetches = [
+                query
+                for query in home.asked
+                if isinstance(query, functions.upload.GetFile)
+            ]
+            assert len(fetches) == 1
+
+    async def test_a_negative_range_is_refused(self):
+        async with live(content=b"x") as (invoker, network):
+            with pytest.raises(ValueError, match="not negative"):
+                async for _ in stream_file(invoker, a_document(), offset=-1):
+                    pass
 
 
 class TestWhenThingsMove:

@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from .manager import Event, UpdateManager
+from .manager import IDLE_CATCH_UP, Event, UpdateManager
 from .state import Verdict, counter_of, judge, seq_verdict
 
 __all__ = [
+    "IDLE_CATCH_UP",
     "Event",
     "UpdateManager",
     "Verdict",

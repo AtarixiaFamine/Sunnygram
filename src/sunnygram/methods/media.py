@@ -22,7 +22,7 @@ from __future__ import annotations
 import mimetypes
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..raw import base, types
 
@@ -33,8 +33,19 @@ __all__ = [
     "name_of",
 ]
 
-# What a caller can ask for, and what each one means on the other side.
-KINDS = ("auto", "photo", "video", "animation", "audio", "voice", "document")
+# What a caller can ask for, and what each one means on the other side. The
+# Literal is what makes kind="documnet" a type error at the call rather than a
+# document sent as a photo at run time.
+FileKind = Literal["auto", "photo", "video", "animation", "audio", "voice", "document"]
+KINDS: tuple[FileKind, ...] = (
+    "auto",
+    "photo",
+    "video",
+    "animation",
+    "audio",
+    "voice",
+    "document",
+)
 
 # The only two Telegram accepts as a photo. Anything else image shaped goes as
 # a document, webp and bmp included: webp is the format a sticker is made of,
@@ -66,7 +77,7 @@ def name_of(source: Any, given: str | None = None) -> str | None:
     return Path(str(found)).name if isinstance(found, (str, os.PathLike)) else None
 
 
-def kind_of(name: str | None, asked: str = "auto") -> str:
+def kind_of(name: str | None, asked: FileKind = "auto") -> FileKind:
     """Which of the five kinds to send this as.
 
     Only the extension is consulted, deliberately. Reading the first bytes of a
@@ -93,7 +104,7 @@ def kind_of(name: str | None, asked: str = "auto") -> str:
 
 def as_media(
     handle: base.InputFile,
-    kind: str,
+    kind: FileKind,
     *,
     name: str | None = None,
     mime_type: str | None = None,
@@ -158,7 +169,7 @@ def as_media(
     )
 
 
-def _mime_for(name: str | None, kind: str) -> str:
+def _mime_for(name: str | None, kind: FileKind) -> str:
     """The content type to declare, guessed from the name and the kind."""
     if name is not None:
         guessed, _ = mimetypes.guess_type(name)

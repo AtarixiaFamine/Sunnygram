@@ -28,7 +28,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from .entities import Span, spans_to_entities, utf16_length
-from .markdown import _link_kind, _unit
+from .markdown import _link_kind, _nesting_rank, _unit
 
 __all__ = ["parse", "unparse"]
 
@@ -137,35 +137,57 @@ def unparse(text: str, entities: list[Any] | None) -> str:
         return escape_html(text, quote=False)
 
     units = text.encode("utf-16-le")
-    marks: dict[int, list[str]] = {}
+    # Gathered apart so that runs meeting at the same place can be put in
+    # nesting order. Two runs starting on the same character have to open
+    # widest first: the other way round produces <i><b>abc</i>de</b>, which is
+    # crossed tags rather than nested ones.
+    opening_at: dict[int, list[tuple[int, int, str]]] = {}
+    closing_at: dict[int, list[tuple[int, int, str]]] = {}
     for entity in entities:
         pair = _tags_for(entity)
         if pair is None:
             continue
         opening, closing = pair
-        marks.setdefault(entity.offset, []).append(opening)
-        marks.setdefault(entity.offset + entity.length, []).insert(0, closing)
+        start = entity.offset
+        end = entity.offset + entity.length
+        rank = _nesting_rank(entity)
+        opening_at.setdefault(start, []).append((end, rank, opening))
+        closing_at.setdefault(end, []).append((start, rank, closing))
+
+    marks: dict[int, list[str]] = {}
+    # Closings first at any given place, innermost first among themselves.
+    for index, closings in closing_at.items():
+        closings.sort(key=lambda held: (-held[0], -held[1]))
+        marks.setdefault(index, []).extend(tag for _, _, tag in closings)
+    for index, openings in opening_at.items():
+        openings.sort(key=lambda held: (-held[0], held[1]))
+        marks.setdefault(index, []).extend(tag for _, _, tag in openings)
 
     out: list[str] = []
-    for index in range(utf16_length(text) + 1):
+    # len(units), not utf16_length(text), which would encode the string twice.
+    for index in range(len(units) // 2 + 1):
         out.extend(marks.get(index, ()))
         if index * 2 < len(units):
             out.append(escape_html(_unit(units, index), quote=False))
     return "".join(out)
 
 
+# Built once rather than per entity.
+_SIMPLE_TAGS = {
+    "MessageEntityBold": "b",
+    "MessageEntityItalic": "i",
+    "MessageEntityUnderline": "u",
+    "MessageEntityStrike": "s",
+    "MessageEntityCode": "code",
+    "MessageEntitySpoiler": "tg-spoiler",
+}
+
+
 def _tags_for(entity: Any) -> tuple[str, str] | None:
     name = type(entity).__name__
-    simple = {
-        "MessageEntityBold": "b",
-        "MessageEntityItalic": "i",
-        "MessageEntityUnderline": "u",
-        "MessageEntityStrike": "s",
-        "MessageEntityCode": "code",
-        "MessageEntitySpoiler": "tg-spoiler",
-    }
-    if name in simple:
-        return f"<{simple[name]}>", f"</{simple[name]}>"
+    tag = _SIMPLE_TAGS.get(name)
+    if tag is not None:
+        return f"<{tag}>", f"</{tag}>"
     if name == "MessageEntityPre":
         language = getattr(entity, "language", "") or ""
         if language:

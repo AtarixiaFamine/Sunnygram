@@ -94,6 +94,13 @@ class Filter:
 
     async def __call__(self, client: Any, event: Any) -> bool:
         answer = self._test(client, event)
+        # Almost every filter is a plain question answered with a plain bool,
+        # and asking inspect whether one is awaitable costs more than the whole
+        # rest of the filter does: it falls through to an abstract base class
+        # check to say no. Two identity tests settle the common case, and
+        # anything else still goes the long way round.
+        if answer is True or answer is False:
+            return answer
         if inspect.isawaitable(answer):
             return bool(await answer)
         return bool(answer)

@@ -165,6 +165,26 @@ await app.start(catch_up=False)
 A session restored from a string has no counters to resume from and always starts from
 now. See [Sessions](sessions.md).
 
+## A stream that goes quiet
+
+Every other recovery here starts from something the server said. This one starts from the
+server saying nothing, which is the one fault the counters cannot see: they move only when
+an update moves them, so a connection that has quietly stopped carrying updates leaves
+them exactly where a quiet account would. The ping loop cannot tell the two apart either,
+because it proves the socket is alive, which was never in doubt.
+
+After a quarter of an hour without a word the client asks anyway, and a difference that
+finds nothing costs one call. Traffic puts the clock back to zero, so a busy account never
+pays it.
+
+```python
+app = Client("me.session", api_id=..., api_hash=..., idle_catch_up=300)  # ask sooner
+app = Client("me.session", api_id=..., api_hash=..., idle_catch_up=0)    # never ask
+```
+
+`app.updates.resyncs` counts the times the stream had to be rebuilt this way, and a number
+that keeps climbing on an account with traffic is worth looking at.
+
 ## Replies come for free
 
 A reply says which message it answers and stops there, so a program wanting the message

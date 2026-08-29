@@ -75,6 +75,24 @@ app = Client("bot.session", api_id=API_ID, api_hash=API_HASH)
 app.run(bot_token="123456:ABC-DEF...")
 ```
 
+## More than one account
+
+`run` is one account's program. For several, `compose` starts them on one loop and puts
+them all down again on the way out:
+
+```python
+import sunnygram
+
+first = sunnygram.Client("one.session", api_id=API_ID, api_hash=API_HASH)
+second = sunnygram.Client("two.session", api_id=API_ID, api_hash=API_HASH)
+
+sunnygram.compose([first, second])
+```
+
+Each keeps its own session, connection and handlers; the loop is all they share. They
+sign in one after another rather than at once, because signing in can ask for a code and
+two accounts asking at the same moment is two prompts on one terminal.
+
 ## What to read next
 
 - [Logging in](login.md) if you want to control the sign-in flow yourself.

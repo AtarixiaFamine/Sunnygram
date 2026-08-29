@@ -177,6 +177,13 @@ class Invoker:
             if connector is None
             else connector
         )
+        # Checked rather than trusted, because a call that is never attempted
+        # leaves the loop below with nothing to raise, and the failure that
+        # comes out of that says nothing about what was actually wrong.
+        if attempts < 1:
+            raise ValueError("a call has to be attempted at least once")
+        if backoff < 0:
+            raise ValueError("a backoff cannot be negative")
         self._attempts = attempts
         self._backoff = backoff
         # On unless turned off. An account is worth more than the throughput

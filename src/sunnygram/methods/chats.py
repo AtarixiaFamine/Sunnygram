@@ -19,7 +19,7 @@ up with a dialog it cannot name.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from ..errors import SunnygramError
 from ..network import Invoker
@@ -79,19 +79,47 @@ async def iter_dialog_pages(
         offset_date, offset_id, offset_peer = cursor
 
 
+# What to ask a channel for. Telegram's own two names for the last pair are the
+# wrong way round for a reader: its "kicked" is someone thrown out and its
+# "banned" is someone still present but silenced. Said the readable way here,
+# the same convention the rights use.
+MemberFilter = Literal[
+    "recent", "admins", "bots", "banned", "restricted", "contacts"
+]
+
+
+def _member_filter(kind: MemberFilter, query: str) -> "base.ChannelParticipantsFilter":
+    """The filter constructor for one of the words above."""
+    if kind == "admins":
+        return types.ChannelParticipantsAdmins()
+    if kind == "bots":
+        return types.ChannelParticipantsBots()
+    if kind == "banned":
+        return types.ChannelParticipantsKicked(q=query)
+    if kind == "restricted":
+        return types.ChannelParticipantsBanned(q=query)
+    if kind == "contacts":
+        return types.ChannelParticipantsContacts(q=query)
+    if query:
+        return types.ChannelParticipantsSearch(q=query)
+    return types.ChannelParticipantsRecent()
+
+
 async def iter_participant_pages(
     invoker: Invoker,
     peer: Target,
     *,
     limit: int = 200,
     query: str = "",
+    kind: MemberFilter = "recent",
     batch: int = PARTICIPANT_BATCH,
 ) -> AsyncIterator[Any]:
     """The members of a group or channel, a page at a time.
 
     A basic group is not paged at all: Telegram answers the whole membership in
     one call, because a basic group is small by definition. A supergroup or a
-    channel is paged, and a search term narrows it.
+    channel is paged, a search term narrows it, and kind asks for one sort of
+    member instead of all of them.
     """
     where = await resolve(invoker, peer)
 
@@ -102,11 +130,7 @@ async def iter_participant_pages(
         yield full
         return
 
-    chosen: base.ChannelParticipantsFilter = (
-        types.ChannelParticipantsSearch(q=query)
-        if query
-        else types.ChannelParticipantsRecent()
-    )
+    chosen = _member_filter(kind, query)
     offset = 0
     while offset < limit:
         page = await invoker.invoke(

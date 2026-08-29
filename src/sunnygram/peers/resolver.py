@@ -30,8 +30,31 @@ if TYPE_CHECKING:
     # circle, since the invoker is what carries the cache this uses, and
     # importing the abstract types would load the API schema at import time
     # instead of at first use (rule P7).
+    from typing import TypeAlias
+
     from ..network import Invoker
     from ..raw import base
+    from ..types import Chat, User
+
+    # Anything that can name a peer, spelled out. It is a union rather than Any
+    # so that an editor can offer what fits and a checker can refuse what does
+    # not, and it lives in here because naming these classes at runtime is what
+    # would load the whole API schema at import (rule P7). Everything in it is
+    # a shape resolve below really accepts. The Chat and User at the end are
+    # the reading wrappers, which are the two above with the fields a program
+    # usually wants in front of them.
+    Target: TypeAlias = (
+        base.InputPeer
+        | base.InputUser
+        | base.InputChannel
+        | base.Peer
+        | base.User
+        | base.Chat
+        | Chat
+        | User
+        | str
+        | int
+    )
 
 __all__ = [
     "Target",
@@ -45,10 +68,10 @@ __all__ = [
     "unmark_id",
 ]
 
-# Anything that can name a peer: an input peer or input user or input channel
-# already, a Peer or a User or a Chat straight out of an answer, an id in either
-# spelling, a username, a phone number, or "me".
-Target = Any
+# The runtime half of the alias above. A checker never sees this one, and
+# nothing at runtime needs it to be narrower than "some object naming a peer".
+if not TYPE_CHECKING:
+    Target = Any
 
 # How the Bot API spells a chat id that is not a user's, and what Sunnygram
 # accepts so that an id copied from there works here. A channel is the negative
@@ -58,6 +81,10 @@ CHANNEL_MARK = -1_000_000_000_000
 # What a username can be made of. Checked before a call goes out so that a typo
 # costs nothing and reads clearly, instead of coming back as USERNAME_INVALID.
 _USERNAME = re.compile(r"^[a-z0-9_]{1,32}$")
+
+# An id that arrived as text. A username has to start with a letter, so nothing
+# spelled entirely in digits is one and there is nothing here to guess at.
+_INTEGER = re.compile(r"^-?[0-9]+$")
 
 # What the server says when the name is fine but no one answers to it. These
 # are not really errors in the caller's sense, they are an answer of no.
@@ -77,6 +104,10 @@ _SELF = frozenset({"me", "self"})
 # Sunnygram without resolving anybody should not pay for that (rule P7).
 _input_peers: tuple[type, ...] = ()
 
+# The same, for the reading wrappers. Naming them at module scope would close a
+# circle, since half of types/ imports this module for its id spelling.
+_wrappers: tuple[type, ...] = ()
+
 
 def _already_a_peer(target: Any) -> TypeGuard[base.InputPeer]:
     """Whether this is an input peer already, in any of its forms."""
@@ -92,6 +123,17 @@ def _already_a_peer(target: Any) -> TypeGuard[base.InputPeer]:
             types.InputPeerChannelFromMessage,
         )
     return isinstance(target, _input_peers)
+
+
+def _is_wrapper(target: Any) -> TypeGuard["Chat | User"]:
+    """Whether this is a Chat or a User, as answers and updates hand them out."""
+    global _wrappers
+    if not _wrappers:
+        from ..types import Chat as _Chat
+        from ..types import User as _User
+
+        _wrappers = (_Chat, _User)
+    return isinstance(target, _wrappers)
 
 
 def mark_id(peer_id: int, kind: PeerKind) -> int:
@@ -225,6 +267,22 @@ async def resolve(invoker: Invoker, target: Target) -> base.InputPeer:
         invoker.peers.learn(target)
         return await _from_id(invoker, target.id)
 
+    if _is_wrapper(target):
+        # The same thing after get_chat or get_user put a readable face on it.
+        # Chat and User are built only from the constructors above and keep the
+        # one they were built from, so this is that branch again rather than a
+        # dispatch back through everything already ruled out.
+        if target.raw is not None:
+            invoker.peers.learn(target.raw)
+            return await _from_id(invoker, target.id)
+        # One somebody assembled by hand, where the id is all there is and does
+        # not say which of the three spaces it belongs to. A Chat carries that
+        # as its kind and a User is a user by definition, and spelling it back
+        # into the id is what keeps a basic group nobody has met from being
+        # read as somebody's account and refused.
+        kind: PeerKind = getattr(target, "kind", PeerKind.USER)
+        return await _from_id(invoker, mark_id(target.id, kind))
+
     raise TypeError(f"{type(target).__name__} does not name a peer")
 
 
@@ -283,13 +341,17 @@ async def _from_text(invoker: Invoker, text: str) -> base.InputPeer:
             "from a link is not part of the peer cache"
         )
 
-    if written.startswith("+") and normalize_phone(written) is not None:
-        digits = normalize_phone(written)
-        assert digits is not None
+    if written.startswith("+") and (digits := normalize_phone(written)) is not None:
         known = await invoker.peers.by_phone(digits)
         if known is None:
             known = await resolve_phone(invoker, digits)
         return input_peer_for(known)
+
+    if _INTEGER.match(written):
+        # Ids travel as text: copied out of another program, read from a config
+        # file, typed into a command. Sending this to the server as a username
+        # would cost a round trip to be told what is knowable here.
+        return await _from_id(invoker, int(written))
 
     name = normalize_username(written)
     if not _USERNAME.match(name):

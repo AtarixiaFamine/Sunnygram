@@ -58,6 +58,18 @@ CAPACITY = 10_000
 FLUSH_EVERY = 64
 
 
+# What people paste in front of a username, in the order a link stacks them:
+# scheme, then host, then the at-sign someone typed anyway. www. is in here
+# because a link copied from a desktop browser carries it and the name behind
+# it is the same account. Every one of these contains a character from the
+# guard in normalize_username below, which is what lets a bare name skip them.
+_LINK_PREFIXES = ("https://", "http://", "www.", "t.me/", "telegram.me/", "@")
+
+# What tells a decorated name from a bare one, and what a link puts after the
+# name. A name holding none of these is already what it normalizes to.
+_DECORATION = ("/", "?", ".", "@")
+
+
 def normalize_username(username: str) -> str:
     """The spelling a username is stored and looked up under.
 
@@ -65,17 +77,22 @@ def normalize_username(username: str) -> str:
     prefix, or both. Everything that reaches the cache has been through here,
     so a lookup only ever has to compare one form.
     """
-    name = username.strip()
-    # In order, because a pasted link stacks them: scheme, then host, then the
-    # at-sign someone typed anyway. www. is in here because a link copied from
-    # a desktop browser carries it and the name behind it is the same account.
-    for prefix in ("https://", "http://", "www.", "t.me/", "telegram.me/", "@"):
-        if name.lower().startswith(prefix):
+    # Lowered once, up front, rather than per prefix. This runs for every peer
+    # in every users vector on the update path, which made seven throwaway
+    # copies of the same string the most repeated allocation in the client.
+    name = username.strip().lower()
+    # A name off the wire is bare, and a name with a link around it was typed by
+    # a person once. Deciding which in four scans keeps the first case, which is
+    # every peer in every users vector, from walking the whole list below.
+    if "." not in name and "/" not in name and "@" not in name and "?" not in name:
+        return name
+    for prefix in _LINK_PREFIXES:
+        if name.startswith(prefix):
             name = name[len(prefix) :]
     # A link can carry a path or a query after the name.
     for separator in ("/", "?"):
         name = name.split(separator, 1)[0]
-    return name.lower()
+    return name
 
 
 def normalize_phone(phone: str | None) -> str | None:
@@ -228,6 +245,17 @@ class PeerCache:
     def misses(self) -> int:
         """Lookups that had to go further than memory."""
         return self._misses
+
+    def kind_of(self, peer_id: int) -> PeerKind | None:
+        """What sort of peer this id belongs to, if this session has met it.
+
+        Memory only, and no round trip: a caller asking this is deciding which
+        call to make, and a lookup that went to the network to find out would
+        cost more than the call it is choosing between. Nothing for an id the
+        session has not seen, which is the honest answer rather than a guess.
+        """
+        record = self._peers.get(peer_id)
+        return record.kind if record is not None else None
 
     def learn(self, *peers: Any) -> int:
         """Take note of whatever users and chats have just arrived.
