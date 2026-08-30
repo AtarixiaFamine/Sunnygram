@@ -4,6 +4,28 @@ All notable changes to Sunnygram are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-30
+
+### Fixed
+
+- **A video in an album keeps its poster frame.** `send_album` took the same per-file
+  options `send_file` takes, and every one of them was a number or a string except the
+  thumbnail, which names a file of its own and has to be uploaded before it can be
+  referred to. `send_file` did that; `send_album` handed the path straight to the media
+  description, where it sat until the request was serialized and the writer asked a
+  `Path` to write itself. Every album carrying a video failed, always, with an
+  `AttributeError` from inside the serializer naming neither the album nor the
+  thumbnail. A single video was unaffected, which is what made this look like a problem
+  with the post rather than with the send.
+
+  The poster goes up as its own file now, as it does for a single send. A photo in an
+  album is not charged for one, since a photo has no thumbnail field to carry it.
+
+- **Taking the buttons away works.** `edit_markup` and `edit_inline_markup` spelled
+  "no keyboard" as an inline keyboard with no rows in it, which reads as the obvious
+  thing and is refused by the server: `REPLY_MARKUP_INVALID`, on every close button
+  a menu has. No keyboard is the field left unset.
+
 ## [1.2.0] - 2026-08-27
 
 ### Fixed

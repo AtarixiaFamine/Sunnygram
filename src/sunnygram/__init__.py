@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from .errors import SunnygramError
 from .tl import TLObject, set_constructor_resolver
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 __all__ = [
     "WHEN_ONLINE",

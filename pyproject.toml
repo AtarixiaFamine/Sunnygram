@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sunnygram"
-version = "1.2.0"
+version = "1.2.1"
 description = "An async, MTProto-native Telegram client library for user accounts."
 readme = "README.md"
 requires-python = ">=3.11"

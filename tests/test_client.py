@@ -474,6 +474,7 @@ class ClientServer(ScriptedServer):
         self.sent: list[Any] = []
         self.asked: list[Any] = []
         self.parts: list[Any] = []
+        self.registered: list[Any] = []
         self.edited: list[Any] = []
         self.next_id = 500
         # Pushed updates have to walk the counter forward one at a time, or
@@ -499,6 +500,26 @@ class ClientServer(ScriptedServer):
     def only(self, kind: type) -> list[Any]:
         """Every call of one kind that reached this server."""
         return [call for call in self.asked if isinstance(call, kind)]
+
+    def _album(self, parts: list[Any]) -> types.Updates:
+        """What a datacenter answers a multi-media send with: one id update and
+        one message per part, sharing a group id."""
+        updates: list[Any] = []
+        for part in parts:
+            self.next_id += 1
+            updates.append(
+                types.UpdateMessageID(id=self.next_id, random_id=part.random_id)
+            )
+            updates.append(
+                types.UpdateNewMessage(
+                    message=a_message(self.next_id, part.message, out=True),
+                    pts=self._next_pts(),
+                    pts_count=1,
+                )
+            )
+        return types.Updates(
+            updates=updates, users=[a_user()], chats=[], date=1700000000, seq=0
+        )
 
     def _next_pts(self) -> int:
         """The next update counter, for anything that moves the stream on.
@@ -622,6 +643,12 @@ class ClientServer(ScriptedServer):
             elif isinstance(query, functions.upload.SaveFilePart):
                 self.parts.append(query)
                 await self.answer(request.msg_id, True)
+            elif isinstance(query, functions.messages.UploadMedia):
+                self.registered.append(query)
+                await self.answer(request.msg_id, a_document_media())
+            elif isinstance(query, functions.messages.SendMultiMedia):
+                self.sent.append(query)
+                await self.answer(request.msg_id, self._album(query.multi_media))
             elif isinstance(query, functions.messages.GetMessages):
                 await self.answer(
                     request.msg_id,
@@ -1346,6 +1373,67 @@ class TestSendingWhatAlreadyExists:
             assert client.file_ref(message) == message.file_ref
 
 
+class TestAlbumOptions:
+    """An album takes the same per-file options a single send does, and a video
+    needs them: without a poster frame, a duration and a size, what arrives is a
+    file rather than something that plays in place."""
+
+    async def test_a_poster_frame_goes_up_as_a_file_of_its_own(self, tmp_path):
+        # The thumbnail is the one option that is not a number: it names a file,
+        # and handing the name itself to the wire put a Path where an uploaded
+        # file belongs. It failed in the serializer, several layers from the
+        # call that was wrong, and it failed for every album carrying a video.
+        poster = tmp_path / "poster.jpg"
+        poster.write_bytes(b"not really a jpeg")
+        async with live() as (client, server):
+            await client.send_album(
+                "@durov",
+                [b"first video", b"second video"],
+                options=[
+                    {
+                        "kind": "video",
+                        "name": "one.mp4",
+                        "thumb": poster,
+                        "duration": 3,
+                        "width": 640,
+                        "height": 480,
+                    },
+                    {"kind": "video", "name": "two.mp4", "thumb": poster},
+                ],
+            )
+        registered = server.only(functions.messages.UploadMedia)
+        assert len(registered) == 2
+        assert all(
+            isinstance(one.media.thumb, types.InputFile) for one in registered
+        )
+
+    async def test_an_album_with_no_poster_asks_for_no_upload_of_one(self, tmp_path):
+        async with live() as (client, server):
+            await client.send_album(
+                "@durov",
+                [b"a video"],
+                options=[{"kind": "video", "name": "one.mp4"}],
+            )
+        registered = server.only(functions.messages.UploadMedia)
+        assert registered[0].media.thumb is None
+
+    async def test_a_photo_is_not_charged_for_a_thumbnail_it_cannot_carry(
+        self, tmp_path
+    ):
+        # A photo has no thumbnail field, so uploading one for it is a round
+        # trip whose answer is thrown away.
+        poster = tmp_path / "poster.jpg"
+        poster.write_bytes(b"not really a jpeg")
+        async with live() as (client, server):
+            await client.send_album(
+                "@durov",
+                [b"a photo"],
+                options=[{"kind": "photo", "name": "one.jpg", "thumb": poster}],
+            )
+        # One file went up, not two.
+        assert len({part.file_id for part in server.parts}) == 1
+
+
 class TestKeyboards:
     async def test_a_keyboard_goes_out_with_the_message(self):
         async with live() as (client, server):
@@ -1380,8 +1468,10 @@ class TestKeyboards:
     async def test_taking_the_buttons_away(self):
         async with live() as (client, server):
             await client.edit_markup("@durov", 5)
-            # An empty inline keyboard is how the protocol spells no keyboard.
-            assert server.edited[-1].reply_markup.rows == []
+            # No keyboard is the field left unset. An inline keyboard with no
+            # rows in it looks like the same thing and is refused on the wire,
+            # so a menu's close button failed with REPLY_MARKUP_INVALID.
+            assert server.edited[-1].reply_markup is None
 
     async def test_a_message_reads_its_own_buttons_back(self):
         async with live() as (client, server):
@@ -1468,7 +1558,8 @@ class TestButtonPresses:
             calls = server.only(functions.messages.EditInlineBotMessage)
             assert calls[0].message == "chosen"
             assert calls[0].id.id == 555
-            assert calls[1].reply_markup.rows == []
+            # Taking the buttons away leaves the field unset, here as anywhere.
+            assert calls[1].reply_markup is None
             # Nothing was fetched: an inline message has no chat to fetch from.
             assert not [
                 call

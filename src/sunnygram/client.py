@@ -897,13 +897,18 @@ class Client:
         Passing nothing takes the keyboard away, which a bot does with
         a menu once it has been used and is the reason this is a call of its
         own instead of an argument to edit_message.
+
+        Taking them away is the field left unset, not an inline keyboard with
+        no rows in it. The empty keyboard reads like the obvious spelling and
+        the server refuses it outright, which is a REPLY_MARKUP_INVALID on
+        every close button a menu has.
         """
         where = await self.resolve(peer)
         answer = await self._invoker.invoke(
             functions.messages.EditMessage(
                 peer=where,
                 id=message_id,
-                reply_markup=markup or types.ReplyInlineMarkup(rows=[]),
+                reply_markup=markup,
             )
         )
         await self._updates.feed(answer)
@@ -924,11 +929,16 @@ class Client:
         )
 
     async def edit_inline_markup(self, inline_id: Any, markup: Any = None) -> bool:
-        """Change the buttons on an inline message, or take them away."""
+        """Change the buttons on an inline message, or take them away.
+
+        Taking them away is the field left unset, the same as for a message in
+        a chat: an inline keyboard with no rows is refused rather than read as
+        no keyboard.
+        """
         return await methods.edit_inline_message(
             self._invoker,
             inline_id,
-            reply_markup=markup or types.ReplyInlineMarkup(rows=[]),
+            reply_markup=markup,
         )
 
     async def answer_inline_query(
@@ -2003,6 +2013,11 @@ class Client:
                 continue
             called = methods.name_of(file, each.pop("name", None))
             chosen = methods.kind_of(called, each.pop("kind", "auto"))
+            # A poster frame is a file of its own and has to go up as one, the
+            # same as in send_file. Handing the path itself to as_media puts a
+            # Path where the wire wants an uploaded file, which fails inside
+            # the serializer with nothing about it naming the thumbnail.
+            poster = each.pop("thumb", None)
             handle = await upload_file(
                 self._invoker, file, name=called, progress=progress, **upload
             )
@@ -2011,6 +2026,15 @@ class Client:
                     handle,
                     chosen,
                     name=None if chosen == "photo" else called,
+                    thumb=(
+                        None
+                        # A photo carries no thumbnail, so uploading one for it
+                        # would be a round trip as_media then discards.
+                        if poster is None or chosen == "photo"
+                        else await upload_file(
+                            self._invoker, poster, name="thumb.jpg"
+                        )
+                    ),
                     **each,
                 )
             )
